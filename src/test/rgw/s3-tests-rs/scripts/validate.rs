@@ -343,7 +343,7 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path) -> Vec<Step> {
                             "sh", &work.to_string_lossy(), &o.adoption_cache.to_string_lossy()])));
                         /* from its own directory, which is where it finds its
                          * conf, patches, locks and expected differences */
-                        let adoption = suite_dir.join("../adoption");
+                        let adoption = suite_dir.join("scripts/adoption");
                         let mut st = step(&cell, "conversion", &adoption,
                             s(&["./standup.rs", "conversion"]));
                         st.env.push(("ADOPTION_WORK".into(), work.to_string_lossy().into()));
