@@ -1,0 +1,21 @@
+diff --git a/src/native/fs/fs_napi.cpp b/src/native/fs/fs_napi.cpp
+index 1fad4bf70..c94b56c69 100644
+--- a/src/native/fs/fs_napi.cpp
++++ b/src/native/fs/fs_napi.cpp
+@@ -314,7 +314,15 @@ build_gpfs_get_ea_request(gpfsRequest_t* reqP, std::string key)
+     reqP->payload.nameLen = nameLen;
+     reqP->payload.bufferLen = bufLen - nameLen;
+     reqP->payload.flags = GPFS_FCNTL_XATTRFLAG_NONE;
+-    memcpy(&reqP->payload.buffer[0], key.c_str(), nameLen);
++    // The name goes into the request's own buffer, which is where the
++    // reply is read from too (see get_fd_gpfs_xattr).  Writing it
++    // through payload.buffer[0] -- a zero-length array at the end of
++    // payload -- reaches the same bytes only because the two members
++    // happen to be adjacent, and is out of bounds as far as the
++    // compiler is concerned:  GCC 15 reports -Warray-bounds and, with
++    // -Werror, refuses to build it.  The write is in bounds through
++    // the member that actually has the storage.
++    memcpy(reqP->buffer, key.c_str(), nameLen);
+ }
+ 
+ template <typename T>
