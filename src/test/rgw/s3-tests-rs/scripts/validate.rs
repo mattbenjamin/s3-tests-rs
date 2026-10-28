@@ -49,7 +49,7 @@ const PARALLEL_LOG: &str = "/tmp/s3test-parallel.log";
 enum Suite {
     Profile(&'static str),
     /* profile `dynamic-groups`, then its membership test again with
-     * `rgwalice` taken out of `rgwfix`, putting her back after (I8) */
+     * `rgwalice` taken out of `rgwfix`, putting her back after */
     DynamicGroups,
     Librgw,
     /* `standup.rs conversion`, which starts its own gateway */
@@ -58,7 +58,7 @@ enum Suite {
 
 struct Cell {
     name: &'static str,
-    /* rgw_nsfs_user_identity_override (I9):  passed to the gateway,
+    /* rgw_nsfs_user_identity_override:  passed to the gateway,
      * shown in every label, and checked against what the gateway says
      * it runs */
     user_identity_override: bool,
@@ -91,8 +91,9 @@ const CELLS: &[Cell] = &[
            suites: &[Suite::Profile("baseline"), Suite::Librgw],
            by_default: true },
     /* the adoption corpus:  NooBaa writes a tree, RGW captures it before
-     * and after conversion, and the captures are compared -- as the
-     * gateway (C2b), and under (n) in each model (Phase G) */
+     * and after conversion, and the captures are compared -- with RGW
+     * as the gateway's own identity, and impersonating under each
+     * access model */
     Cell { name: "conversion", user_identity_override: false, vstart: &[],
            suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict" }],
            by_default: false },
@@ -102,7 +103,7 @@ const CELLS: &[Cell] = &[
     Cell { name: "conversion-s3-native", user_identity_override: false, vstart: &[],
            suites: &[Suite::Conversion { impersonate: true, access_model: "s3-native" }],
            by_default: false },
-    /* the same six with rgw_nsfs_user_identity_override on (I9):  an
+    /* the same six with rgw_nsfs_user_identity_override on:  an
      * account user's own row overrides its account's, as NooBaa serves
      * an IAM user from its own record */
     Cell { name: "posix-strict-override", user_identity_override: true,

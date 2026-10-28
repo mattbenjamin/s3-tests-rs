@@ -52,7 +52,7 @@ pub enum KeyClass {
     /// a name starting with NooBaa's temp prefix, `.noobaa-nsfs`, which
     /// NooBaa's listing hides by prefix match although its temp
     /// directory is only `.noobaa-nsfs_<bucket id>`;  an ordinary object
-    /// under RGW (DECISIONS.md 2026-10-12)
+    /// under RGW
     ReservedTemp,
     /// an arbitrary dotfile, which they list as an ordinary object
     Dotfile,
@@ -78,8 +78,8 @@ impl KeyClass {
     /// The maximum-length keys, in a bucket of their own.  NooBaa
     /// accepts a key up to S3's 1024 bytes;  the nsfs listing cache
     /// holds 510 bytes of name, and a longer key in a tree another
-    /// gateway wrote empties that bucket's listing (PUNCHLIST.md, "one
-    /// over-long name in a foreign tree").  Kept apart so it hides
+    /// gateway wrote empties that bucket's listing, a known defect.
+    /// Kept apart so it hides
     /// nothing but itself.
     pub const MAX_LENGTH: &'static [KeyClass] = &[
         KeyClass::MaxLengthOneComponent,

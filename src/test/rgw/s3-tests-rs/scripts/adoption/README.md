@@ -9,12 +9,13 @@ It is the workflow driver and tests nothing itself.  The corpus is in
 
 ## Why this exists
 
-`docs/NSFS_WORK_PLAN.md` §4, in the nsfs design set:  until
-this exists, every control in the adoption work is composed from *our
-reading* of NooBaa's schema, so a passing stage is evidence about our
-reading rather than about NooBaa's output.  The corpus's nine axes
-validate RGW against S3.  Nothing yet validates RGW against NooBaa,
-because nothing has written a NooBaa tree.
+Without a tree NooBaa itself wrote, every control in the adoption
+work would be composed from *our reading* of NooBaa's schema, so a
+passing stage would be evidence about our reading rather than about
+NooBaa's output.  The corpus's axes validate RGW against S3;  this
+driver is what validates RGW against NooBaa, by having NooBaa write
+the tree RGW then adopts.  `scripts/validate.rs` runs it in six
+deployments, the adoption matrix (`../../docs/validation.md`).
 
 ## Running it
 
@@ -97,7 +98,7 @@ now.
 
 **Sequential handoff against one tree.**  NooBaa writes, stops, then
 RGW opens the same directory.  That is the adoption story — drain,
-then upgrade — and it is what `docs/NSFS_CORPUS.md` already assumes.
+then upgrade — and it is what the conversion corpus already assumes.
 Both gateways serving at once is a separate feature and must not be
 smuggled in here.
 

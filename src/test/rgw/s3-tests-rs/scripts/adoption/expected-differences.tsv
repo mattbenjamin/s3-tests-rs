@@ -63,24 +63,24 @@
 # `.noobaa-nsfs-k-under-temp` is a client's object whose name starts
 # with NooBaa's temp prefix.  NooBaa stores it and its listing hides it
 # -- the prefix it hides is wider than its temp directory,
-# `.noobaa-nsfs_<bucket id>` -- and RGW lists it, which is correct
-# (DECISIONS.md 2026-10-12).  The corpus asserts the RGW side in observe
+# `.noobaa-nsfs_<bucket id>` -- and RGW lists it, which is correct.
+# The corpus asserts the RGW side in observe
 # mode;  these rows account for NooBaa's.
 
 # `k-maxlens/...` is a 1024-byte key, each component under NAME_MAX,
 # that NooBaa accepts.  RGW's listing cache holds at most
 # mdb_env_get_maxkeysize() - 1 bytes of name, so after import the key is
-# not listed -- and one such entry empties its whole bucket's listing
-# (PUNCHLIST.md, OPEN).  Known, not expected:  it must keep failing until
+# not listed -- and one such entry empties its whole bucket's listing.
+# Known, not expected:  it must keep failing until
 # LMDB is built with a larger key size.
-noobaa:unadopted		manifest	object k-maxlens/*	*	known	PUNCHLIST.md "one over-long name in a foreign tree empties the whole listing":  the LMDB listing cache cannot hold a key over its maximum key size;  fix by building LMDB with a larger one
+noobaa:unadopted		manifest	object k-maxlens/*	*	known	one over-long name in a foreign tree empties the whole listing:  the LMDB listing cache cannot hold a key over its maximum key size;  fix by building LMDB with a larger one
 
 # `m-collide-content-md5` carries user metadata named content_md5.  NooBaa
 # stores user metadata as user.<key>, so it lands in user.content_md5, the
 # attribute NooBaa keeps the ETag in -- a collision, and a NooBaa defect.
 # NooBaa reports that attribute twice, as the ETag and, by design, as
-# metadata;  RGW reports it as the ETag only (DECISIONS.md 2026-10-13).
-noobaa:unadopted		manifest	object m-collide-content-md5	meta.content_md5	vanishes	NooBaa reports user.content_md5 as metadata as well as the ETag, by design (their test_namespace_fs.js:242);  here a client's content_md5 metadata collided with it.  RGW reports the attribute as the ETag alone (DECISIONS.md 2026-10-13)
+# metadata;  RGW reports it as the ETag only.
+noobaa:unadopted		manifest	object m-collide-content-md5	meta.content_md5	vanishes	NooBaa reports user.content_md5 as metadata as well as the ETag, by design (their test_namespace_fs.js:242);  here a client's content_md5 metadata collided with it.  RGW reports the attribute as the ETag alone
 
 noobaa:unadopted		manifest	object .noobaa-nsfs-k-under-temp	listed	absent	NooBaa's listing hides every name starting with .noobaa-nsfs (namespace_fs.js:787);  RGW lists the object, as it should
 noobaa:unadopted		manifest	object .noobaa-nsfs-k-under-temp	size	absent	same:  the size comes from the listing
@@ -93,8 +93,7 @@ noobaa:unadopted		manifest	object .noobaa-nsfs-k-under-temp	body-*	absent	same: 
 # three captures are three independent reads of the same bytes by two
 # gateways.  Nothing else in either artifact looks at content -- the
 # manifest records what S3 says and the inventory what is on disk.
-# Validation is the suite's job and not the gateway's;  `DECISIONS.md`
-# 2026-10-09.
+# Validation is the suite's job and not the gateway's.
 
 noobaa:unadopted		manifest		body-md5	equal	adoption writes one attribute per bucket and rewrites no object, so every byte must read back the same
 unadopted:converted		manifest		body-md5	equal	conversion rewrites metadata, not content;  a difference here is data loss
@@ -128,8 +127,8 @@ unadopted:converted	md5-on	manifest		etag	equal	conversion renames the attribute
 noobaa:unadopted		manifest		listed-owner	differs	_get_object_owner() returns undefined always, so NooBaa objects have no owner;  answering from the inode uid is an RGW addition
 noobaa:unadopted		manifest		version.*.owner	differs	same cause as listed-owner, per version
 noobaa:unadopted		manifest		ownership-controls	differs	NooBaa has no setting, and its GetBucketOwnershipControls error carries no code, so the axis reads Unknown;  RGW, serving the same bucket before adoption, returns OwnershipControlsNotFoundError
-unadopted:converted		manifest		ownership-controls	differs	adoption writes BucketOwnerEnforced on every bucket it adopts, because RGW records the bucket's owner on every object (DECISIONS.md 2026-10-11, the object-owner plan);  NooBaa has no setting, and before adoption the bucket reads as NooBaa's, OwnershipControlsNotFoundError
-noobaa:unadopted		manifest		in-flight-initiator	differs	NooBaa records no initiator for an upload and reports a placeholder;  RGW reports the bucket's owner, deduced (DECISIONS.md 2026-10-11, step 3b)
+unadopted:converted		manifest		ownership-controls	differs	adoption writes BucketOwnerEnforced on every bucket it adopts, because RGW records the bucket's owner on every object;  NooBaa has no setting, and before adoption the bucket reads as NooBaa's, OwnershipControlsNotFoundError
+noobaa:unadopted		manifest		in-flight-initiator	differs	NooBaa records no initiator for an upload and reports a placeholder;  RGW reports the bucket's owner, deduced
 noobaa:unadopted		manifest		in-flight-owner	differs	same as in-flight-initiator
 noobaa:unadopted		manifest		log-target-policy	absent	the outcome of applying a policy to the log target, which only the generating pass does;  an observing pass applies nothing (generate.rs)
 noobaa:unadopted		manifest		request-payment.payer-read	absent	NooBaa answers 501 NotImplemented to PutBucketRequestPayment, so its pass reads no payer back;  RGW reports its default payer, BucketOwner
@@ -149,7 +148,7 @@ noobaa:unadopted		manifest		*.error	absent	bucket configuration:  the code a fai
 noobaa:unadopted		manifest		warmed-with	differs	the key count a warming listing saw, taken partway through the run -- so it reports the harness's own sequence rather than the tree, and differs between any two passes that build the tree differently.  A fact about the capture, not about what was captured
 noobaa:unadopted		manifest		*.gained	absent	which stored names changed when the configuration was applied.  Differential, so it needs a before and an after that only an applying pass has
 noobaa:unadopted		manifest		*.present	absent	the observing pass's counterpart to `.gained`:  which stored names are there, absolutely rather than differentially.  Present only in an observed capture, which is the same kind of row in the other direction
-unadopted:converted		manifest		*.present	differs	which stored names hold the bucket's configuration:  before adoption, the fields of NooBaa's configuration store, `buckets/<name>.json`, which P5 reads in place;  adoption writes them as RGW's attributes on the bucket directory
+unadopted:converted		manifest		*.present	differs	which stored names hold the bucket's configuration:  before adoption, the fields of NooBaa's configuration store, `buckets/<name>.json`, which RGW reads in place;  adoption writes them as RGW's attributes on the bucket directory
 noobaa:unadopted		manifest		parts-listed	absent	from ListParts, which needs an upload id -- an outcome only the pass that created the upload has.  An observing capture does not ask
 noobaa:unadopted		manifest		part.*.size	absent	same:  the per-part facts come from ListParts on an upload still in flight
 
@@ -160,7 +159,7 @@ noobaa:unadopted		manifest		part.*.size	absent	same:  the per-part facts come fr
 unadopted:converted		inventory	*.folder	*	appears	an empty directory object has no sentinel in NooBaa's layout, only user.noobaa.dir_content on the directory;  conversion creates the nsfs sentinel for it, empty, with the directory's mtime (convert_directory_object())
 unadopted:converted		inventory	.noobaa-nsfs_*/multipart-uploads/*	*	vanishes	conversion re-stages an upload still in flight out of NooBaa's temp directory (NSFSBucket::convert_uploads);  its record, parts and directory go
 unadopted:converted		inventory	.multipart_*	*	appears	and into nsfs's staging directory, `.multipart_<key>.<upload id>`, one file per part with a `.meta` record
-unadopted:converted		inventory		xattr:user.nsfs.*	appears	conversion writes each object's attributes in the nsfs spelling and marks the bucket (`user.nsfs.extensions`).  Appears, not absent:  an nsfs name that vanished would be a loss, since a bucket's own state is in the nsfs spelling before conversion too (DECISIONS.md 2026-10-13)
+unadopted:converted		inventory		xattr:user.nsfs.*	appears	conversion writes each object's attributes in the nsfs spelling and marks the bucket (`user.nsfs.extensions`).  Appears, not absent:  an nsfs name that vanished would be a loss, since a bucket's own state is in the nsfs spelling before conversion too
 unadopted:converted		inventory		xattr:user.noobaa.*	vanishes	their internal namespace becomes user.nsfs.* -- NB_KEYS, xattr_strategy.cc:127
 unadopted:converted		inventory		xattr:user.storage_class	vanishes	NB_KEYS maps it;  it is the one name their own reader hides from user metadata, via XATTR_METADATA_IGNORE_LIST
 unadopted:converted		inventory		xattr:user.content_md5	vanishes	maps to RGW_ATTR_ETAG alone, so a converted object stops carrying the key -- a decision, not a defect, recorded in docs/NOOBAA_WRITE_SURFACE.md
@@ -170,7 +169,7 @@ unadopted:converted		inventory		xattr:user.*	vanishes	user metadata is plain use
 # One item, with no class asserted because it needs a measurement
 # rather than an argument:
 #
-#   inventory  mode    C1 normalizes permissions and their files are
+#   inventory  mode    conversion normalizes permissions and their files are
 #       0660 in the capture.  What conversion writes has not been
 #       measured against a tree they wrote.
 #

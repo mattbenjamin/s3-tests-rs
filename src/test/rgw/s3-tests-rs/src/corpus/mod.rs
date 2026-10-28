@@ -7,7 +7,7 @@
 //! inventory formats, writing and parsing both, so a comparison of two
 //! captures reads them with the code that wrote them;  and the names of
 //! the environment variables a workflow driver such as
-//! `adoption/standup.rs` sets to run it.
+//! `scripts/adoption/standup.rs` sets to run it.
 
 pub mod compare;
 pub mod env;

@@ -528,8 +528,7 @@ pub const STORAGE_COVERAGE: &[StorageClass] = &[
 /// The root object is the same thing with the bucket's own directory as
 /// the directory, under every key made only of slashes.  So the content
 /// type and metadata of each are what moves at adoption, and what an
-/// unconverted reader has to find on the directory
-/// (`docs/RGW_NSFS_VADE_MECUM.md` §14, key semantics).
+/// unconverted reader has to find on the directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectoryObjectClass {
     /// no bytes:  NooBaa writes no `.folder` at all

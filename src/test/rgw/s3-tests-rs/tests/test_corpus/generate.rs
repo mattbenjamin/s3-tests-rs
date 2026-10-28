@@ -341,8 +341,7 @@ async fn keys_axis(name: &str, classes: &[KeyClass]) {
     );
 
     /* A client's object whose name starts with NooBaa's temp prefix is
-     * an ordinary object under RGW (DECISIONS.md 2026-10-12), though
-     * NooBaa's listing hides it.  Asserted in observe mode, where the
+     * an ordinary object under RGW, though NooBaa's listing hides it.  Asserted in observe mode, where the
      * tree is adopted:  it must list, and listing it puts it through
      * the content check below. */
     if observing() && classes.contains(&KeyClass::ReservedTemp) {
@@ -425,7 +424,7 @@ fn check_listing_invariants(written: &[String], listed: &[String]) {
      * defect:  its temp directory is `.noobaa-nsfs_<bucket id>`, but
      * its listing hides the whole prefix, so a client's object named
      * that way is stored and lost from listings.  RGW lists it, which is
-     * correct (DECISIONS.md 2026-10-12).  This gate, under
+     * correct.  This gate, under
      * `fails_on_noobaa` only, tolerates NooBaa's behaviour so a NooBaa
      * capture still runs;  it is not a requirement, and no run against
      * RGW may require those keys hidden.  The other keys still have to

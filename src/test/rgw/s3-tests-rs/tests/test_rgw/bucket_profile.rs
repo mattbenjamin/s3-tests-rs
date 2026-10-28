@@ -2,7 +2,7 @@
 //!
 //! An nsfs bucket directory with no `user.nsfs.extensions` marker is
 //! NooBaa's:  a bucket RGW has not taken over, read as NooBaa wrote it
-//! and not written (DECISIONS.md 2026-10-21).  A marked bucket carries
+//! and not written.  A marked bucket carries
 //! the extensions.  Every bucket this gateway creates is marked;  an
 //! unmarked one comes from NooBaa's tree, or, for a test, from the
 //! `unmarked-bucket` driver hint.
@@ -190,7 +190,7 @@ async fn test_profile_cannot_be_reduced_with_content() {
 
 /// An unmarked bucket is read and not written:  it has not been taken
 /// over, so a client's PUT is rejected with InvalidBucketState and a
-/// listing is served (DECISIONS.md 2026-10-21).
+/// listing is served.
 #[cfg_attr(not(feature = "rgw_admin"), ignore = "requires rgw_admin feature")]
 #[tokio::test]
 async fn test_an_unmarked_bucket_takes_no_writes() {

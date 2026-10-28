@@ -1,8 +1,8 @@
 //! On a filesystem backend '/' separates path components, so an empty
 //! component is not a name:  a leading slash and a doubled one name the
 //! same object as the key without them.  NooBaa maps a key onto a path
-//! with `path.normalize` and behaves the same, and nsfs keeps that
-//! (`docs/RGW_NSFS_VADE_MECUM.md` §14, key semantics:  `/y`, `a//b`).
+//! with `path.normalize` and behaves the same, and nsfs keeps that:
+//! `/y` is `y`, and `a//b` is `a/b`.
 //!
 //! S3 itself does not normalize:  on AWS and on RADOS `/y` and `y` are
 //! two objects, so those backends are gated.

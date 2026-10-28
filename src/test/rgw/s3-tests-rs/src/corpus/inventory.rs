@@ -5,9 +5,8 @@
 //!
 //! Two questions this answers and the manifest cannot:
 //!
-//!   * **Does anything of NooBaa's remain?**  `NSFS_ADOPTION.md` §8
-//!     says a bucket is converted when no object carries a
-//!     NooBaa-named attribute, and that is not observable over S3.
+//!   * **Does anything of NooBaa's remain?**  A bucket is converted
+//!     when no object carries a NooBaa-named attribute, and that is not observable over S3.
 //!     Attribute **names** are recorded, not values:  the values are
 //!     what the manifest already covers.
 //!   * **Did a created file get the ownership it should have?**
@@ -626,7 +625,7 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
 ///
 /// **Which keys exist is read from the file.**  Nothing here encodes
 /// NooBaa's schema -- no field name appears in this function -- which
-/// is the point:  interpreting their record is what I1 owns, and
+/// is the point:  interpreting their record is the import's job, and
 /// composing our reading of it is exactly what the capture exists to
 /// stop relying on.  A name and a digest is an observation, not an
 /// interpretation.

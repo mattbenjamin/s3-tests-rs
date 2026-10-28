@@ -1,6 +1,5 @@
 //! `/admin/nsfs/bucket` -- a directory that is already there, placed as
-//! a bucket:  NooBaa's `manage_nsfs bucket add --path` (DECISIONS.md
-//! 2026-10-14).
+//! a bucket:  NooBaa's `manage_nsfs bucket add --path`.
 //!
 //! Under `nsfs-adoption`, for now.  The directory is made by the gateway,
 //! through the `unplaced-directory` driver hint, under its base path,

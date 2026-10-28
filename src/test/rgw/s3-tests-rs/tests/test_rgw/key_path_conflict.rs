@@ -2,8 +2,7 @@
 //! object (a file) or a directory, never both, so the keys `p` and `p/`,
 //! or `p` and any key under `p/`, cannot exist together.  The one
 //! written first holds the name until it is deleted, and a write of the
-//! other returns 409 `KeyPathConflict`, in both directions
-//! (DECISIONS.md 2026-10-24).  A 500 would tell the client to retry a
+//! other returns 409 `KeyPathConflict`, in both directions.  A 500 would tell the client to retry a
 //! write that cannot succeed.
 //!
 //! A key without the trailing `/` that names a directory has no object,
@@ -221,7 +220,7 @@ async fn versioned_keys(client: &S3Client, b: &str, prefix: &str) -> Vec<String>
  * it does unversioned.  A delete of the key writes no delete marker:
  * `d` names no object and none can be written while `d/` holds the
  * name, so the delete returns 204 and changes nothing, as NooBaa's
- * delete_object() does (DECISIONS.md 2026-10-24).  A multi-object
+ * delete_object() does.  A multi-object
  * delete of it does the same. */
 #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws")]
 #[cfg_attr(feature = "fails_on_rados", ignore = "fails on rados")]

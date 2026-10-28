@@ -143,7 +143,7 @@ test-threads = 1
 default-filter = 'test(dynamic_groups::)'
 test-threads = 1
 
-# The role identity override's test (I9), alone:  the override is
+# The role identity override's test, alone:  the override is
 # daemon-global and the test switches it.  After baseline, against the
 # same gateway.
 [profile.role-identity]

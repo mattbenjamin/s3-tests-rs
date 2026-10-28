@@ -1,8 +1,8 @@
 //! The environment variables that drive the corpus.
 //!
-//! The one list of them.  `adoption/standup.rs` sets them and has no
-//! dependencies to import these from, so it names them as strings and
-//! cites this file.
+//! The one list of them.  `scripts/adoption/standup.rs` sets them and
+//! has no dependencies to import these from, so it names them as
+//! strings and cites this file.
 
 /// `coverage` (default), `interaction` or `scale`.
 pub const TIER: &str = "CORPUS_TIER";

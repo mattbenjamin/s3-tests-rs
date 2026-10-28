@@ -2862,8 +2862,8 @@ async fn test_object_standard_storage_class_not_reported() {
  *
  * nsfs serves listings from an LMDB cache whose maximum key size is
  * about half that, and rejects such a key with KeyTooLongError rather
- * than store one it could not list (PUNCHLIST.md, OPEN:  "one over-long
- * name in a foreign tree empties the whole listing").  The gate goes
+ * than store one it could not list;  such a key in a tree another
+ * gateway wrote empties that bucket's whole listing.  The gate goes
  * when LMDB is built with a larger key size;
  * test_rgw::key_limit pins the rejection until then. */
 #[cfg_attr(feature = "fails_on_nsfs", ignore = "nsfs: the LMDB listing cache holds about 510 bytes of key")]
