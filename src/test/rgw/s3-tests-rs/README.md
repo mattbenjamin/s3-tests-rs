@@ -369,6 +369,14 @@ against;  `scripts/validate.rs`, which runs them with one `sudo`
 password;  and the adoption matrix, in which NooBaa writes a tree and
 RGW is held to what NooBaa served from it.
 
+**Read its "Before the first run" first.**  Running against nsfs with
+impersonation needs things of the machine that a plain run does not:
+a build on a mount without `nosuid`, data roots every user can reach,
+`sudo`, and free fixture uids.  `validate.rs` takes your paths from a
+config file, named by `VALIDATE_CONF` as the suite's is by
+`S3TEST_CONF`, or else `~/.config/s3-tests-rs/validate.conf`;  that
+document describes it.  It has no defaults of its own.
+
 ## Infrastructure constraints
 
 Some S3 features require external services not present in a minimal test cluster.

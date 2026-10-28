@@ -118,14 +118,38 @@ struct Env {
     user_identity_override: bool,
 }
 
-/// Every setting, from `adoption.conf` and then the environment.
+/// `--config FILE`, when it was given;  set once, by main().
+static CONFIG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The settings file:  `--config FILE`, else `$ADOPTION_CONF`, else
+/// `adoption.conf` beside this driver.  The command line wins over the
+/// environment.
+fn conf_file() -> PathBuf {
+    if let Some(p) = CONFIG.get() {
+        return p.clone();
+    }
+    match std::env::var_os("ADOPTION_CONF").filter(|v| !v.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => adoption_home().join("adoption.conf"),
+    }
+}
+
+/// Every setting, from the settings file and then the environment.
 ///
 /// `ADOPTION_WORK` and `work = ` are the same setting;  the environment
-/// wins.
-fn settings() -> BTreeMap<String, String> {
+/// wins.  A file named by `--config` or `ADOPTION_CONF` must exist;
+/// `adoption.conf` beside this driver is read if it does.
+fn settings() -> Result<BTreeMap<String, String>, String> {
     let mut m = BTreeMap::new();
-    let conf = adoption_home().join("adoption.conf");
-    if let Ok(text) = std::fs::read_to_string(&conf) {
+    let conf = conf_file();
+    let named = CONFIG.get().is_some()
+        || std::env::var_os("ADOPTION_CONF").is_some_and(|v| !v.is_empty());
+    let text = match std::fs::read_to_string(&conf) {
+        Ok(t) => Some(t),
+        Err(e) if named => return Err(format!("{}: {e}", conf.display())),
+        Err(_) => None,
+    };
+    if let Some(text) = text {
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -137,11 +161,12 @@ fn settings() -> BTreeMap<String, String> {
         }
     }
     for (k, v) in std::env::vars() {
-        if let Some(rest) = k.strip_prefix("ADOPTION_") {
+        /* ADOPTION_CONF names the file and is not a setting */
+        if let Some(rest) = k.strip_prefix("ADOPTION_").filter(|r| *r != "CONF") {
             m.insert(rest.to_ascii_lowercase(), v);
         }
     }
-    m
+    Ok(m)
 }
 
 impl Env {
@@ -154,8 +179,7 @@ impl Env {
     /// put the deliverable somewhere nominally disposable, and it
     /// chose the location without being asked.
     fn load() -> Result<Env, String> {
-        let s = settings();
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+        let s = settings()?;
 
         let Some(work) = s.get("work").filter(|v| !v.is_empty()) else {
             return Err(format!(
@@ -166,7 +190,7 @@ impl Env {
                  ADOPTION_WORK=/path/to/adoption standup.rs <step>\n\n  \
                  or, standing, in {}:\n\n    work = /path/to/adoption\n\n  \
                  See adoption.conf.sample.",
-                adoption_home().join("adoption.conf").display()
+                conf_file().display()
             ));
         };
         let work = PathBuf::from(work);
@@ -176,7 +200,8 @@ impl Env {
         };
 
         Ok(Env {
-            src: get("noobaa_src", &format!("{home}/dev/noobaa-core")).into(),
+            /* no default:  where a developer keeps their clone is theirs */
+            src: get("noobaa_src", "").into(),
             pin: get("pin", "08d063f86"),
             /* `rgw-vstart.sh --data-root DIR` serves DIR/root, so the
              * tree NooBaa writes has to be data/root for the handoff to
@@ -339,7 +364,15 @@ const STEPS: &[(&str, &str)] = &[
 ];
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--config") {
+        if args.len() < 2 {
+            eprintln!("standup: --config takes a file");
+            std::process::exit(2);
+        }
+        let _ = CONFIG.set(PathBuf::from(args.remove(1)));
+        args.remove(0);
+    }
     let cmd = args.first().map(String::as_str).unwrap_or("list");
 
     /* `list` is how you find out what to set, so it must work before
@@ -405,10 +438,14 @@ fn list() {
     }
 
     println!("\nEach setting is an ADOPTION_<NAME> environment variable, or the");
-    println!("same name in adoption.conf beside this driver;  the environment");
-    println!("wins.\n");
+    println!("same name in the settings file, {};  the", conf_file().display());
+    println!("environment wins.  The file is --config FILE, else ADOPTION_CONF,");
+    println!("else adoption.conf beside this driver.\n");
 
-    let s = settings();
+    let s = settings().unwrap_or_else(|e| {
+        eprintln!("standup: {e}");
+        BTreeMap::new()
+    });
     let shown = [
         ("work", "REQUIRED -- the worktree, config store, data root, logs"),
         ("ceph_build", "REQUIRED for `adopt` -- the ceph build directory"),
@@ -448,6 +485,13 @@ fn list() {
 /// reading noobaa-core's source at some other commit is a thing we do
 /// constantly and this must not disturb it.
 fn pin(env: &Env) -> Result<(), String> {
+    if env.src.as_os_str().is_empty() {
+        return Err(format!(
+            "`noobaa_src` is not set:  the noobaa-core clone to stand up from.\n  \
+             ADOPTION_NOOBAA_SRC=/path/to/noobaa-core standup.rs <step>, or\n  \
+             `noobaa_src = /path/to/noobaa-core` in {}",
+            conf_file().display()));
+    }
     if !env.src.join(".git").exists() {
         return Err(format!(
             "{} is not a git clone of noobaa-core;  set ADOPTION_NOOBAA_SRC",
@@ -572,6 +616,20 @@ fn patch(env: &Env) -> Result<(), String> {
         println!("patch    {found} for this pin, {applied} newly applied");
     }
     Ok(())
+}
+
+/// `rgw-vstart.sh` in the ceph source tree `build` was configured from:
+/// `CMAKE_HOME_DIRECTORY` in its `CMakeCache.txt`, as the script itself
+/// finds it.  A build directory need not be inside the tree it builds.
+fn rgw_vstart(build: &Path) -> Result<PathBuf, String> {
+    let cache = build.join("CMakeCache.txt");
+    let text = std::fs::read_to_string(&cache)
+        .map_err(|e| format!("{}: {e};  is `ceph_build` the ceph build directory?",
+                             cache.display()))?;
+    text.lines()
+        .find_map(|l| l.strip_prefix("CMAKE_HOME_DIRECTORY:INTERNAL="))
+        .map(|v| PathBuf::from(v.trim()).join("src/script/rgw/rgw-vstart.sh"))
+        .ok_or_else(|| format!("{} has no CMAKE_HOME_DIRECTORY", cache.display()))
 }
 
 /// Where this driver and its data files live.
@@ -726,6 +784,27 @@ fn native(env: &Env) -> Result<(), String> {
 /// NooBaa's CLI fails a duplicate `add`, which is correct of it and not
 /// what this driver wants.
 fn config(env: &Env) -> Result<(), String> {
+    /* Under `impersonate` NooBaa's accounts are the fixture uids, and
+     * `manage_nsfs` refuses an account that cannot read its
+     * new_buckets_path, which is in the data root.  Those uids own none
+     * of the directories above it and are in none of their groups, so
+     * each needs the other-execute bit;  a 0700 home directory is the
+     * usual one that lacks it.  Said here, naming the directory, rather
+     * than as NooBaa's InaccessibleAccountNewBucketsPath. */
+    if env.impersonate {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(blocked) = env.data.ancestors()
+            .filter_map(|a| std::fs::metadata(a).ok().map(|m| (a, m)))
+            .filter(|(_, m)| m.is_dir())
+            .find(|(_, m)| m.permissions().mode() & 0o001 == 0)
+            .map(|(a, _)| a.to_path_buf()) {
+            return Err(format!(
+                "the fixture uids cannot search {}, so NooBaa's accounts cannot reach \
+                 the data root {}.  Put `work` (or `data`) somewhere every user can \
+                 reach.", blocked.display(), env.data.display()));
+        }
+    }
+
     /* The modality check, before this step creates anything.
      *
      * Refusing rather than overwriting:  the modality is fixed in the
@@ -1660,7 +1739,7 @@ fn vstart_id(env: &Env, var: &str) -> Result<u32, String> {
         return Err("`impersonate` takes vstart's fixture ids, so `ceph_build` \
                     must be set".into());
     };
-    let p = build.join("../src/script/rgw/rgw-vstart.sh");
+    let p = rgw_vstart(build)?;
     let text = std::fs::read_to_string(&p)
         .map_err(|e| format!("cannot read {}: {e}", p.display()))?;
     text.lines().find_map(|l| l.strip_prefix(&format!("{var}=")))
@@ -1936,7 +2015,7 @@ fn capture(env: &Env, side: &str) -> Result<(), String> {
             "{} is not the s3-tests-rs suite.  It is normally two levels up from\n  \
              this driver;  set ADOPTION_SUITE, or `suite = ` in {}.",
             env.suite.display(),
-            adoption_home().join("adoption.conf").display()
+            conf_file().display()
         ));
     }
 
@@ -2066,10 +2145,13 @@ fn capture(env: &Env, side: &str) -> Result<(), String> {
      * Under `impersonate` the corpus runs as the account, which owns
      * the tree and so can read all of it:  the test binary, built
      * here, run through `sudo -u`, with its environment given on the
-     * command line because sudo does not pass this one on. */
+     * command line because sudo does not pass this one on.  The copy
+     * in `work` is what runs:  the account may not be able to reach
+     * the suite's target directory, under a 0700 home directory, but
+     * `config` has already held `work` to every user's reach. */
     let mut cmd = Command::new("bash");
     if env.impersonate {
-        let exe = corpus_executable(env)?;
+        let exe = staged_executable(env, &corpus_executable(env)?)?;
         let (uid, gid) = account_ids(env)?;
         let st = privileged(env, "chown").arg(format!("{uid}:{gid}")).arg(&dir).status()
             .map_err(|e| format!("cannot run chown: {e}"))?;
@@ -2768,13 +2850,13 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
              be\n  invoked from the ceph build directory:\n\n    \
              ADOPTION_CEPH_BUILD=/path/to/ceph/build standup.rs adopt\n\n  \
              or put `ceph_build = /path/to/ceph/build` in {}.",
-            adoption_home().join("adoption.conf").display()
+            conf_file().display()
         ));
     };
     /* `import` starts the gateway `adopt` reuses, and both run alone as
      * well as under `conversion`, so both check what conversion does */
     preflight_rgw(build)?;
-    let script = build.join("../src/script/rgw/rgw-vstart.sh");
+    let script = rgw_vstart(build)?;
     if !script.exists() {
         return Err(format!(
             "{} is not there;  is {} really a ceph build directory?",
@@ -3377,7 +3459,7 @@ fn fixture_ids(env: &Env) -> Result<(u32, u32), String> {
         return Err("`impersonate` takes vstart's fixture ids, so `ceph_build` \
                     must be set".into());
     };
-    let p = build.join("../src/script/rgw/rgw-vstart.sh");
+    let p = rgw_vstart(build)?;
     let text = std::fs::read_to_string(&p)
         .map_err(|e| format!("cannot read {}: {e}", p.display()))?;
     let get = |k: &str| text.lines()
@@ -3484,6 +3566,20 @@ fn corpus_executable(env: &Env) -> Result<String, String> {
         .find(|v| v["target"]["name"] == "test_corpus" && v["executable"].is_string())
         .and_then(|v| v["executable"].as_str().map(str::to_string))
         .ok_or_else(|| "cargo built no test_corpus executable".into())
+}
+
+/// `exe` copied to `work/bin/`, readable and executable by every user.
+fn staged_executable(env: &Env, exe: &str) -> Result<String, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let src = Path::new(exe);
+    let dir = env.work.join("bin");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let dst = dir.join(src.file_name().unwrap_or_default());
+    std::fs::copy(src, &dst).map_err(|e| format!("copying {exe} to {}: {e}", dst.display()))?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+        .and_then(|_| std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755)))
+        .map_err(|e| format!("{}: {e}", dst.display()))?;
+    Ok(dst.display().to_string())
 }
 
 /// The uid and gid this process runs as, without a libc dependency.

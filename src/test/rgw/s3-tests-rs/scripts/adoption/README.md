@@ -29,17 +29,22 @@ cargo +nightly -Zscript standup.rs up        # every built step
 fresh machine:  `rustup toolchain install nightly`.  Stable cargo
 cannot run this file.
 
-Every setting is an environment variable with a default;  `list`
-prints them.
+Every setting is an environment variable, or a line in a settings
+file;  the environment wins.  The file is `--config FILE`, given before
+the step (`standup.rs --config FILE pin`), else the one `ADOPTION_CONF`
+names, else `adoption.conf` beside this file;  copy
+`adoption.conf.sample` to start one.  The paths have no defaults,
+because they are your machine's;  `list` prints every setting and which
+file it read.
 
 | | |
 |---|---|
-| `ADOPTION_NOOBAA_SRC` | the developer's noobaa-core clone.  **Read only** |
+| `ADOPTION_NOOBAA_SRC` | **required for `pin`, and so for `up` and `conversion`.**  your noobaa-core clone, containing the pin.  **Read only** |
 | `ADOPTION_PIN` | the commit to stand up |
-| `ADOPTION_WORK` | **required.**  the worktree, the NooBaa config, the data root, logs, captures |
+| `ADOPTION_WORK` | **required.**  the worktree, the NooBaa config, the data root, logs, captures.  Under `ADOPTION_IMPERSONATE`, every directory above it must be searchable by every user, which `config` checks |
 | `ADOPTION_DATA` | the tree both gateways serve;  defaults to `$ADOPTION_WORK/data` |
 | `ADOPTION_PORT` | the NooBaa endpoint |
-| `ADOPTION_CEPH_BUILD` | **required for `adopt`.**  the ceph build directory |
+| `ADOPTION_CEPH_BUILD` | **required for `adopt`.**  the ceph build directory;  `rgw-vstart.sh` is found in the source tree its `CMakeCache.txt` names |
 | `ADOPTION_SUITE` | the s3-tests-rs checkout;  defaults to two levels up from this driver |
 | `ADOPTION_TIER` | which corpus tier `capture` runs |
 

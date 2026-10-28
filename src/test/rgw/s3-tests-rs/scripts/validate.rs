@@ -22,7 +22,26 @@ edition = "2021"
 //!
 //!   scripts/validate.rs [--dry-run] [--no-build] [--no-unit] [--no-librgw]
 //!                       [--lifecycle] [--cells a,b] [--test EXPR]
-//!                       [--build DIR] [--conf FILE] [--adoption-cache DIR]
+//!                       [--config FILE] [--build DIR] [--conf FILE]
+//!                       [--adoption-cache DIR] [--noobaa-src DIR]
+//!                       [--work-root DIR] [--parallel-log FILE]
+//!
+//! The paths are this machine's, so none has a default here.  Each comes
+//! from its option, or else from a config file, `key = value` per line.
+//! The file is `--config FILE`, else `$VALIDATE_CONF` -- as the suite
+//! takes `$S3TEST_CONF` -- else the per-user
+//! `$XDG_CONFIG_HOME/s3-tests-rs/validate.conf` (by default
+//! `~/.config/s3-tests-rs/validate.conf`):
+//!
+//!   build          = /path/to/ceph/build        required
+//!   conf           = /path/to/s3tests.conf      required
+//!   adoption_cache = /path/to/adoption-cache    for the conversion cells
+//!   noobaa_src     = /path/to/noobaa-core       for the conversion cells
+//!   work_root      = /path/to/work              for the conversion cells;
+//!                                                every fixture uid must be
+//!                                                able to search it
+//!   parallel_log   = /path/to/log               every suite's output,
+//!                                                appended;  optional
 //!
 //! `--test` runs only the tests a nextest filter expression selects, in
 //! each cell, in place of its profiles;  `--cells` picks the cells.  The
@@ -44,7 +63,6 @@ const FEATURES: &str = "fails_on_nsfs,rgw_admin";
 /* vstart's fixed test user, which the librgw suites mount as */
 const AWS_KEY: &str = "0555b35654ad1656d804";
 const AWS_SECRET: &str = "h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q==";
-const PARALLEL_LOG: &str = "/tmp/s3test-parallel.log";
 
 enum Suite {
     Profile(&'static str),
@@ -145,8 +163,15 @@ struct Opts {
     cells: Option<Vec<String>>,
     test: Option<String>,
     build_dir: PathBuf,
+    /* the ceph source tree, from the build's CMakeCache.txt */
+    source_dir: PathBuf,
     conf: PathBuf,
     adoption_cache: PathBuf,
+    noobaa_src: PathBuf,
+    /* where the conversion cells' work directories go;  under the run
+     * directory when unset */
+    work_root: Option<PathBuf>,
+    parallel_log: Option<PathBuf>,
 }
 
 /// One command, as it is run and as it is printed.
@@ -197,7 +222,9 @@ fn main() {
         .unwrap_or_else(|_| "run".into());
     let run_dir = suite_dir.join("target/validate").join(&stamp);
 
-    let steps = plan(&opts, &suite_dir, &run_dir);
+    let work_dir = opts.work_root.as_ref().map(|w| w.join(&stamp))
+        .unwrap_or_else(|| run_dir.clone());
+    let steps = plan(&opts, &suite_dir, &run_dir, &work_dir);
     println!("validate:  {} steps, logs under {}", steps.len(), run_dir.display());
     for s in &steps {
         println!("  [{}] {}:  {}", label(&s.cell, s.user_identity_override), s.name, s.show());
@@ -206,7 +233,7 @@ fn main() {
         return;
     }
 
-    preflight(&opts).unwrap_or_else(|e| die(&e));
+    preflight(&opts, &steps).unwrap_or_else(|e| die(&e));
     take_sudo().unwrap_or_else(|e| die(&e));
     fs::create_dir_all(&run_dir).unwrap_or_else(|e| die(&format!("{}: {e}", run_dir.display())));
 
@@ -218,7 +245,7 @@ fn main() {
             continue;
         }
         println!("\n==> [{}] {}", label(&s.cell, s.user_identity_override), s.name);
-        let (res, summary) = run(s, &run_dir);
+        let (res, summary) = run(s, &run_dir, opts.parallel_log.as_deref());
         let ok = res != Res::Fail;
         println!("    {} {summary}", res.label());
         if !ok && s.name == "vstart" {
@@ -267,7 +294,7 @@ fn main() {
     }
 }
 
-fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path) -> Vec<Step> {
+fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step> {
     let b = &o.build_dir;
     let step = |cell: &str, name: &str, cwd: &Path, argv: Vec<String>| Step {
         cell: cell.into(), name: name.into(), cwd: cwd.to_path_buf(), argv,
@@ -281,7 +308,7 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path) -> Vec<Step> {
         argv.extend(s(TARGETS));
         steps.push(step("build", "build", b, argv));
     }
-    let caps = vstart_caps(b);
+    let caps = vstart_caps(&o.source_dir);
     if o.unit {
         let unit = b.join("bin/unittest_rgw_nsfs_driver");
         let caps = caps.as_ref().unwrap_or_else(|e| die(e));
@@ -290,7 +317,7 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path) -> Vec<Step> {
         steps.push(step("unit", "unittest", b, vec![unit.to_string_lossy().into()]));
     }
 
-    let vstart = b.join("../src/script/rgw/rgw-vstart.sh");
+    let vstart = o.source_dir.join("src/script/rgw/rgw-vstart.sh");
     for c in CELLS {
         match &o.cells {
             Some(want) if !want.iter().any(|w| w == c.name) => continue,
@@ -338,7 +365,7 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path) -> Vec<Step> {
                         steps.push(step(&cell, "setcap-unit", b, s(&["sudo", "-n", "setcap",
                             &format!("{caps}+p"),
                             &b.join("bin/unittest_rgw_nsfs_driver").to_string_lossy()])));
-                        let work = run_dir.join(&cell).join("work");
+                        let work = work_dir.join(&cell).join("work");
                         steps.push(step(&cell, "work", b, s(&["sh", "-c",
                             "mkdir -p \"$1\" && for w in \"$2\"/noobaa-*; do ln -s \"$w\" \"$1\"/; done",
                             "sh", &work.to_string_lossy(), &o.adoption_cache.to_string_lossy()])));
@@ -349,6 +376,7 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path) -> Vec<Step> {
                             s(&["./standup.rs", "conversion"]));
                         st.env.push(("ADOPTION_WORK".into(), work.to_string_lossy().into()));
                         st.env.push(("ADOPTION_CEPH_BUILD".into(), b.to_string_lossy().into()));
+                        st.env.push(("ADOPTION_NOOBAA_SRC".into(), o.noobaa_src.to_string_lossy().into()));
                         st.env.push(("ADOPTION_IMPERSONATE".into(), impersonate.to_string()));
                         st.env.push(("ADOPTION_ACCESS_MODEL".into(), access_model.to_string()));
                         st.env.push(("ADOPTION_USER_IDENTITY_OVERRIDE".into(),
@@ -429,16 +457,16 @@ impl Res {
 
 /// Run a step with its output in its own log, and the summary line the
 /// suite prints:  nextest's `Summary`, or gtest's PASSED/FAILED counts.
-fn run(s: &Step, run_dir: &Path) -> (Res, String) {
+fn run(s: &Step, run_dir: &Path, parallel_log: Option<&Path>) -> (Res, String) {
     let dir = run_dir.join(&s.cell);
     let _ = fs::create_dir_all(&dir);
     let mut log = match File::create(dir.join(format!("{}.log", s.name))) {
         Ok(f) => f,
         Err(e) => return (Res::Fail, format!("cannot create its log: {e}")),
     };
-    let mut parallel = s.parallel_log.then(|| {
-        OpenOptions::new().create(true).append(true).open(PARALLEL_LOG).ok()
-    }).flatten();
+    let mut parallel = parallel_log.filter(|_| s.parallel_log).and_then(|p| {
+        OpenOptions::new().create(true).append(true).open(p).ok()
+    });
     let _ = writeln!(log, "# {}", s.show());
 
     /* stderr into the same pipe, so the log holds both in order */
@@ -490,15 +518,12 @@ fn run(s: &Step, run_dir: &Path) -> (Res, String) {
     (res, summary.join(";  "))
 }
 
-fn preflight(o: &Opts) -> Result<(), String> {
+fn preflight(o: &Opts, steps: &[Step]) -> Result<(), String> {
     let status = fs::read_to_string("/proc/self/status").map_err(|e| e.to_string())?;
     let euid = status.lines().find(|l| l.starts_with("Uid:"))
         .and_then(|l| l.split_whitespace().nth(2)).unwrap_or("0");
     if euid == "0" {
         return Err("run as yourself, not root:  rgw-vstart.sh --with-impersonation refuses root, and sudo is taken where it is needed".into());
-    }
-    if !std::io::stdin().is_terminal() {
-        return Err("needs a terminal:  the sudo ticket is per tty, and the password is asked once, here".into());
     }
     if Command::new("pgrep").args(["-x", "ninja"]).stdout(Stdio::null()).status()
         .map(|s| s.success()).unwrap_or(false) {
@@ -510,7 +535,44 @@ fn preflight(o: &Opts) -> Result<(), String> {
     if !o.conf.is_file() {
         return Err(format!("{} does not exist", o.conf.display()));
     }
+    /* setcap on a nosuid mount succeeds, and the kernel then ignores the
+     * capabilities:  every impersonated test would fail as a denial */
+    let bin = o.build_dir.join("bin");
+    if let Ok(out) = Command::new("findmnt").args(["-no", "OPTIONS", "-T"]).arg(&bin).output() {
+        if String::from_utf8_lossy(&out.stdout).split(',').any(|f| f.trim() == "nosuid") {
+            return Err(format!("{} is on a nosuid mount, where file capabilities are \
+                                ignored;  build on a mount without nosuid", bin.display()));
+        }
+    }
+    /* an impersonated conversion writes its tree as the fixture uids */
+    for s in steps.iter().filter(|s| s.name == "conversion"
+                                 && s.env.iter().any(|(k, v)| k == "ADOPTION_IMPERSONATE" && v == "true")) {
+        let work = s.env.iter().find(|(k, _)| k == "ADOPTION_WORK").map(|(_, v)| PathBuf::from(v));
+        if let Some(blocked) = work.as_deref().and_then(unsearchable_ancestor) {
+            return Err(format!("the fixture uids cannot search {}, so cell {} cannot \
+                                stand NooBaa up in {};  set work_root (or --work-root) to \
+                                a directory every user can reach", blocked.display(),
+                               s.cell, work.unwrap().display()));
+        }
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err("needs a terminal:  the sudo ticket is per tty, and the password is asked once, here".into());
+    }
     Ok(())
+}
+
+/// The first existing ancestor of `p` that a fixture uid cannot search.
+/// `rgw-vstart.sh --with-impersonation` serves identities as uids
+/// 70101-70110, which own none of these directories and are in none of
+/// their groups, so what lets them through is the other-execute bit.
+/// `None` when every ancestor has it.
+fn unsearchable_ancestor(p: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    p.ancestors()
+        .filter_map(|a| fs::metadata(a).ok().map(|m| (a, m)))
+        .filter(|(_, m)| m.is_dir())
+        .find(|(_, m)| m.permissions().mode() & 0o001 == 0)
+        .map(|(a, _)| a.to_path_buf())
 }
 
 /// One password, then the ticket refreshed every minute for the run.
@@ -527,8 +589,8 @@ fn take_sudo() -> Result<(), String> {
 }
 
 /// The capability string, from rgw-vstart.sh's own `sudo setcap` line.
-fn vstart_caps(build: &Path) -> Result<String, String> {
-    let p = build.join("../src/script/rgw/rgw-vstart.sh");
+fn vstart_caps(source: &Path) -> Result<String, String> {
+    let p = source.join("src/script/rgw/rgw-vstart.sh");
     let text = fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
     text.lines()
         .find_map(|l| l.trim().strip_prefix("sudo setcap ")
@@ -580,32 +642,30 @@ fn nproc() -> String {
 }
 
 fn parse_args() -> Opts {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut o = Opts {
-        dry_run: false, build: true, unit: true, librgw: true,
-        lifecycle: false, cells: None, test: None,
-        build_dir: PathBuf::from("/lv2tb/ceph-cp/build"),
-        conf: PathBuf::from(format!("{home}/dev/rgw/s3tests.conf")),
-        adoption_cache: PathBuf::from("/lv2tb/nsfs-interchange"),
-    };
+    let mut flags = Flags::default();
+    let mut config: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut val = |flag: &str| args.next().unwrap_or_else(|| die(&format!("{flag} takes a value")));
         match a.as_str() {
-            "--dry-run" => o.dry_run = true,
-            "--no-build" => o.build = false,
-            "--no-unit" => o.unit = false,
-            "--no-librgw" => o.librgw = false,
-            "--test" => o.test = Some(val("--test")),
-            "--lifecycle" => o.lifecycle = true,
-            "--cells" => o.cells = Some(val("--cells").split(',').map(str::to_string).collect()),
-            "--build" => o.build_dir = PathBuf::from(val("--build")),
-            "--conf" => o.conf = PathBuf::from(val("--conf")),
-            "--adoption-cache" => o.adoption_cache = PathBuf::from(val("--adoption-cache")),
+            "--dry-run" => flags.dry_run = true,
+            "--no-build" => flags.no_build = true,
+            "--no-unit" => flags.no_unit = true,
+            "--no-librgw" => flags.no_librgw = true,
+            "--test" => flags.test = Some(val("--test")),
+            "--lifecycle" => flags.lifecycle = true,
+            "--cells" => flags.cells = Some(val("--cells").split(',').map(str::to_string).collect()),
+            "--config" => config = Some(PathBuf::from(val("--config"))),
+            "--build" => flags.paths.push(("build", val("--build"))),
+            "--conf" => flags.paths.push(("conf", val("--conf"))),
+            "--adoption-cache" => flags.paths.push(("adoption_cache", val("--adoption-cache"))),
+            "--noobaa-src" => flags.paths.push(("noobaa_src", val("--noobaa-src"))),
+            "--work-root" => flags.paths.push(("work_root", val("--work-root"))),
+            "--parallel-log" => flags.paths.push(("parallel_log", val("--parallel-log"))),
             _ => die(&format!("unknown argument {a};  see the header of validate.rs")),
         }
     }
-    if let Some(want) = &o.cells {
+    if let Some(want) = &flags.cells {
         for w in want {
             if !CELLS.iter().any(|c| c.name == w) {
                 die(&format!("no cell {w};  the cells are {}",
@@ -613,7 +673,113 @@ fn parse_args() -> Opts {
             }
         }
     }
-    o
+
+    /* an option wins over the file;  the per-user file is read only if
+     * it exists, and a file named by --config or VALIDATE_CONF must */
+    let named = config.or_else(|| std::env::var_os("VALIDATE_CONF")
+        .filter(|v| !v.is_empty()).map(PathBuf::from));
+    let file = named.clone().unwrap_or_else(default_config);
+    let mut settings = read_config(&file, named.is_some());
+    for (k, v) in flags.paths {
+        settings.insert(k.to_string(), v);
+    }
+    let path = |key: &str| settings.get(key).map(|v| PathBuf::from(expand_home(v)));
+    let need = |key: &str, flag: &str| path(key).unwrap_or_else(|| die(&format!(
+        "no {key}:  pass {flag}, or set `{key} = ...` in {}", file.display())));
+
+    let conversion = CELLS.iter().any(|c| {
+        let selected = match &flags.cells {
+            Some(want) => want.iter().any(|w| w == c.name),
+            None => c.by_default,
+        };
+        selected && c.suites.iter().any(|s| matches!(s, Suite::Conversion { .. }))
+    });
+    let build_dir = need("build", "--build");
+    let source_dir = source_tree(&build_dir).unwrap_or_else(|e| die(&e));
+    Opts {
+        dry_run: flags.dry_run, build: !flags.no_build, unit: !flags.no_unit,
+        librgw: !flags.no_librgw, lifecycle: flags.lifecycle,
+        cells: flags.cells, test: flags.test,
+        conf: need("conf", "--conf"),
+        adoption_cache: if conversion { need("adoption_cache", "--adoption-cache") }
+                        else { path("adoption_cache").unwrap_or_default() },
+        noobaa_src: if conversion { need("noobaa_src", "--noobaa-src") }
+                    else { path("noobaa_src").unwrap_or_default() },
+        work_root: path("work_root"),
+        parallel_log: path("parallel_log"),
+        build_dir, source_dir,
+    }
+}
+
+/// The command line, before the config file fills in what it leaves out.
+#[derive(Default)]
+struct Flags {
+    dry_run: bool,
+    no_build: bool,
+    no_unit: bool,
+    no_librgw: bool,
+    lifecycle: bool,
+    cells: Option<Vec<String>>,
+    test: Option<String>,
+    paths: Vec<(&'static str, String)>,
+}
+
+/// `$XDG_CONFIG_HOME/s3-tests-rs/validate.conf`, or under `~/.config`.
+fn default_config() -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(expand_home("~/.config")));
+    base.join("s3-tests-rs/validate.conf")
+}
+
+/// `key = value` lines;  `#` starts a comment.  A key this program does
+/// not know is refused, so a misspelled one is not silently ignored.
+fn read_config(file: &Path, named: bool) -> std::collections::HashMap<String, String> {
+    const KEYS: &[&str] = &["build", "conf", "adoption_cache", "noobaa_src", "work_root",
+                            "parallel_log"];
+    let mut m = std::collections::HashMap::new();
+    let text = match fs::read_to_string(file) {
+        Ok(t) => t,
+        Err(e) if !named && e.kind() == std::io::ErrorKind::NotFound => return m,
+        Err(e) => die(&format!("{}: {e}", file.display())),
+    };
+    for (n, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            die(&format!("{}:{}:  not `key = value`", file.display(), n + 1));
+        };
+        let k = k.trim();
+        if !KEYS.contains(&k) {
+            die(&format!("{}:{}:  unknown key {k};  the keys are {}",
+                         file.display(), n + 1, KEYS.join(", ")));
+        }
+        m.insert(k.to_string(), v.trim().to_string());
+    }
+    m
+}
+
+fn expand_home(v: &str) -> String {
+    match v.strip_prefix("~/") {
+        Some(rest) => format!("{}/{rest}", std::env::var("HOME").unwrap_or_default()),
+        None => v.to_string(),
+    }
+}
+
+/// The ceph source tree a build was configured from, as `rgw-vstart.sh`
+/// finds it:  `CMAKE_HOME_DIRECTORY` in the build's `CMakeCache.txt`.
+/// A build directory need not be inside the tree it builds.
+fn source_tree(build: &Path) -> Result<PathBuf, String> {
+    let cache = build.join("CMakeCache.txt");
+    let text = fs::read_to_string(&cache)
+        .map_err(|e| format!("{}: {e};  is {} the ceph build directory?",
+                             cache.display(), build.display()))?;
+    text.lines()
+        .find_map(|l| l.strip_prefix("CMAKE_HOME_DIRECTORY:INTERNAL="))
+        .map(|v| PathBuf::from(v.trim()))
+        .ok_or_else(|| format!("{} has no CMAKE_HOME_DIRECTORY", cache.display()))
 }
 
 fn die(msg: &str) -> ! {
