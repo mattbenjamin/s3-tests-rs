@@ -305,50 +305,22 @@ async fn owners_sequence(client: &aws_sdk_s3::Client, bucket: &str)
 /// A bucket on a directory its account owns, as a NooBaa bucket's is
 /// its account's, `0770` (`bucketspace_fs.js` create_bucket):  the
 /// account does everything with it that it does with a bucket the
-/// gateway made.  Under impersonation only, where the directory's owner
+/// gateway made, and deleting the bucket leaves the directory as it
+/// was found.  Under impersonation only, where the directory's owner
 /// is an identity and not the gateway;  the gateway must be unprivileged
 /// for the answer to mean anything, as root's capabilities override the
 /// directory's mode.
 ///
-/// The account is served as `rgwalice` (70101), and the directory is
-/// made as it by the `unplaced-directory` hint's `as`, in a sticky
-/// directory the gateway makes for it under the base path.
+/// The account is served as `rgwacct1` (70107), and the directory is
+/// made as it by the `unplaced-directory` hint's `as`, under a `0711`
+/// directory the gateway makes for it in the base path.
 ///
-/// **It fails today, which is the point of it.**  Run 2026-10-16 on an
-/// unprivileged impersonating gateway, both columns fail, for
-/// different reasons.
-///
-/// *The owned column fails at the first step.*  Placement fails with
-/// EACCES -- `writing user.nsfs.extensions on bucket ...: (13) Permission
-/// denied`, after which the bucket is rolled back -- so the account
-/// never reaches one S3 operation on its own directory, and every
-/// later step reads `NoSuchBucket`.  Marking a directory the gateway
-/// does not own needs `CAP_DAC_OVERRIDE` and `CAP_FOWNER` raised
-/// around that write:  raise site 1 of the (n) plan, built in its
-/// phase E.
-///
-/// *The control column fails one step*, on a bucket the gateway made:
-/// overwriting an object in a versioned bucket answers 500 (`ERROR:
-/// version demote failed for k1 sr=2`).  `demote_current_version()`
-/// hard-links the current object into `.versions/` as the gateway,
-/// and with `fs.protected_hardlinks=1` a process may not link a file
-/// it neither owns nor can write -- so the demote fails as soon as
-/// the object is an identity's.  `safe_link()` takes an identity and
-/// none of its four call sites passes one;  that is phase D.
-///
-/// **Run again 2026-10-22, after raise site 1 (ceph `b06489fb743`):**
-/// the control column is clean -- phase D's demote carries the identity
-/// -- and the owned column passes every step but one:  placement and
-/// every bucket-state write succeed.  Multipart fails at create,
-/// `could not create bucket .multipart_...: (13) Permission denied`:
-/// staging is made by the gateway, which cannot write a bucket directory
-/// the account owns at 0770.  Who owns staging is raise site 4's open
-/// question.
-///
-/// Ignored until site 4 lands;  run it with `--run-ignored all`, and
-/// every step prints its outcome beside the control's, so the table
-/// says how much of (n) has arrived.
-#[ignore = "multipart fails on the account's directory until (n) raise site 4 decides who owns staging"]
+/// Each step runs on both buckets and prints its outcome beside the
+/// control's, so a failure shows which steps an account-owned directory
+/// loses.  The last check is that the hint can remove the directory once
+/// the bucket is gone:  a placed bucket's directory is left in place,
+/// and anything nsfs left in it, such as a version lock under
+/// `.versions`, would make it not empty.
 #[cfg_attr(not(feature = "rgw_admin"), ignore = "requires rgw_admin feature")]
 #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws")]
 #[cfg_attr(feature = "fails_on_rados", ignore = "fails on rados")]
@@ -376,10 +348,9 @@ async fn test_place_bucket_serves_an_account_owned_directory() {
     assert_eq!(r.status, 200, "making {owned} as the account: {}", r.body);
     let dir = as_json(&r).expect("the hint's reply is not JSON")["results"]["path"]
         .as_str().expect("the hint reports no path").to_string();
-    /* Placement is the first step and is recorded, not asserted.  It
-     * is what fails today, and asserting it here would hide every
-     * step below it and skip the removal of a directory this process
-     * cannot remove afterwards. */
+    /* Placement is the first step and is recorded, not asserted:
+     * asserting it here would hide every step below it and skip the
+     * removal of a directory this process cannot remove afterwards. */
     let placed = place(&owned, &dir, me).await;
     let placement = if placed.status == 200 {
         "ok".to_string()
