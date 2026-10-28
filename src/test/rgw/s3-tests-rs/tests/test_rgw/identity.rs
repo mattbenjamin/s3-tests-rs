@@ -759,7 +759,7 @@ async fn test_credentials_of_a_user_in_an_account() {
 /// the user's row is used when it has one;  moving that row moves
 /// what is recorded, so the value tracks the row rather than being
 /// echoed;  and such a user with **no** row is served as its account,
-/// which is the Scale case and the one the consumer sites must get
+/// which is the common case and the one the consumer sites must get
 /// right.
 ///
 /// The account is the test's own ([`PrivateAccount`]), so its row can
@@ -951,13 +951,13 @@ async fn test_attrs_and_delete_run_as_the_account_user() {
          chose {:?}, not {moved_to}",
         moved.get("ran_as_delete"));
 
-    /* And the fallback, which is the Scale case and the one the
-     * consumer sites have to get right:  a user with **no row of
-     * its own** is served as its account
+    /* And the fallback, the common case and the one the consumer
+     * sites have to get right:  a user with **no row of its own** is
+     * served as its account
      * (`test_credentials_of_a_user_in_an_account` settles the
-     * resolution;  this asserts it reaches the consumer).  On Scale
-     * every such user ordinarily has no row, so this is the common
-     * shape there and not an edge. */
+     * resolution;  this asserts it reaches the consumer).  A user
+     * made through RGW's IAM has no row until one is written, so this
+     * is the ordinary shape and not an edge. */
     scrub(&acct_user).await;
     assert_eq!(driver_hint_results("ran-as", &[("select", &acct_user)])
         .await.expect("re-selecting failed")

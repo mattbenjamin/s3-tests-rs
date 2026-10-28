@@ -6,6 +6,31 @@ run against, how `scripts/validate.rs` runs them, and how to read the
 result.  It assumes a Ceph build with the nsfs driver and its
 `src/script/rgw/rgw-vstart.sh`.
 
+## Before the first run:  what the machine needs
+
+Nothing here assumes a particular machine, but several things have to
+be true of yours.  Each script checks the ones it can and names what is
+wrong;  the rest are listed so a failure is not a surprise.
+
+| what | why | checked by |
+|---|---|---|
+| a Ceph build of the branch with the nsfs driver | the gateway and the unit suite | `validate.rs`:  the build directory has `bin/` and a `CMakeCache.txt`, which also gives it the source tree, wherever that is |
+| the build on a mount without `nosuid` | `setcap` there succeeds and the kernel ignores the capabilities, so every impersonated request would fail as a denial | `validate.rs`, and `rgw-vstart.sh --with-impersonation` |
+| every directory above the data roots searchable by every user (`o+x`) | impersonated identities are system users that own none of those directories;  a `0700` home directory is the usual one that blocks them | `rgw-vstart.sh --with-impersonation` for the gateway's data root;  `validate.rs` and the stand-up's `config` for a conversion's work directory |
+| `sudo` from a terminal, run as yourself and not as root | `rgw-vstart.sh --with-impersonation` creates the fixture's system users and group, applies `setcap`, and owns files as them | `validate.rs` asks for the password once;  both refuse root |
+| uids 70101-70110 and gid 70010 free, or already the fixture's | the fixture creates `rgwalice`, `rgwbob` and the rest at those ids, and the group `rgwfix` | `rgw-vstart.sh`, which reuses accounts that exist by name |
+| port 8000 free for the gateway | `rgw-vstart.sh` stops whatever holds it (`fuser -k 8000/tcp`) | -- |
+| a copy of `s3tests.conf.SAMPLE`, named by `S3TEST_CONF` or `validate.rs`'s `conf` | the suite's users and keys;  the sample already matches what `vstart.sh` creates | `validate.rs`:  the file exists |
+| `cargo-nextest`, and a nightly toolchain (`rustup toolchain install nightly`) | the suite runs under nextest;  `validate.rs` and `standup.rs` are `-Zscript` files | -- |
+| `python3` | `rgw-vstart.sh --with-impersonation` seeds its fixture with `nsfs-impersonate-fixture.py` | -- |
+| for the conversion deployments:  `node`, a native toolchain, and a noobaa-core clone containing the pin | the stand-up builds NooBaa from source | `standup.rs pin` |
+| for the bench profiles:  `elbencho` | the workloads;  its path is `elbencho_bin` in `[bench]` of `s3tests.conf` | the bench tests |
+
+The suite itself takes `S3TEST_CONF` and nothing else from the
+environment.  Against nsfs, run it with `--features
+fails_on_nsfs,rgw_admin`:  the first skips what nsfs is known not to
+do, the second enables the tests that use Admin Ops and driver hints.
+
 ## What a deployment can vary, and how each is tested
 
 A setting a site chooses when it deploys the gateway is tested at one
@@ -97,14 +122,42 @@ from you.  Run it from your own terminal, as yourself, from the
 suite's root.  It is a nightly `-Zscript`:  `rustup toolchain install
 nightly` on a fresh machine.
 
-**Point it at your paths first.**  Its defaults are one developer's
-machine:
+**Tell it your paths once, in a config file.**  It has no defaults,
+because every one of them is a property of your machine.  As the suite
+takes its own config from `S3TEST_CONF`, `validate.rs` takes this one
+from `VALIDATE_CONF`;  `--config FILE` overrides that, and with
+neither it reads the per-user `~/.config/s3-tests-rs/validate.conf`
+(under `$XDG_CONFIG_HOME` if that is set).  A file named by
+`VALIDATE_CONF` or `--config` must exist;  the per-user one is read if
+it does.  One `key = value` per line, `#` for comments, `~/` for your
+home directory:
 
-| option | default | what it is |
-|---|---|---|
-| `--build DIR` | `/lv2tb/ceph-cp/build` | the ceph build directory |
-| `--conf FILE` | `~/dev/rgw/s3tests.conf` | your `s3tests.conf` |
-| `--adoption-cache DIR` | `/lv2tb/nsfs-interchange` | where the built NooBaa worktree is, for the conversion deployments |
+```
+build          = /path/to/ceph/build
+conf           = /path/to/s3tests.conf
+# the conversion deployments
+adoption_cache = /path/to/adoption-cache
+noobaa_src     = /path/to/noobaa-core
+work_root      = /path/to/work
+# optional:  every suite's output appended to one file
+parallel_log   = /tmp/s3test-parallel.log
+```
+
+| key | option | what it is | needed |
+|---|---|---|---|
+| `build` | `--build DIR` | the ceph build directory | always |
+| `conf` | `--conf FILE` | your `s3tests.conf` | always |
+| `adoption_cache` | `--adoption-cache DIR` | where the built NooBaa worktree is, below | for a conversion deployment |
+| `noobaa_src` | `--noobaa-src DIR` | your noobaa-core clone, read only | for a conversion deployment |
+| `work_root` | `--work-root DIR` | where the conversion deployments' work directories go;  every user must be able to search it | for an impersonated conversion deployment whose run directory is not reachable |
+| `parallel_log` | `--parallel-log FILE` | every suite's output, appended | never |
+
+An option overrides the file.  A key that is needed and missing is
+refused, naming the key and the file;  an unknown key is refused too,
+so a misspelling is not silently ignored.  Without `work_root` the
+work directories go under the run directory, `target/validate/` in the
+suite, which is fine when the checkout is somewhere every user can
+search and refused before anything starts when it is not.
 
 **The adoption cache is built once,** by the stand-up's first four
 steps with `ADOPTION_WORK` set to the cache directory.  It then holds
@@ -114,8 +167,8 @@ fresh work directory instead of rebuilding NooBaa:
 ```bash
 cd scripts/adoption
 for step in pin worktree patch build; do
-  ADOPTION_NOOBAA_SRC=$HOME/dev/noobaa-core \
-  ADOPTION_WORK=$HOME/nsfs-adoption-cache ./standup.rs $step || break
+  ADOPTION_NOOBAA_SRC=/path/to/noobaa-core \
+  ADOPTION_WORK=/path/to/adoption-cache ./standup.rs $step || break
 done
 ```
 
@@ -125,7 +178,7 @@ native addon.
 **The full matrix** is every deployment, named:
 
 ```bash
-./scripts/validate.rs --build $BUILD --conf $CONF --adoption-cache $CACHE \
+./scripts/validate.rs \
   --cells posix-strict,s3-native,plain,posix-strict-override,s3-native-override,plain-override,conversion,conversion-posix-strict,conversion-s3-native,conversion-override,conversion-posix-strict-override,conversion-s3-native-override
 ```
 
