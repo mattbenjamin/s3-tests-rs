@@ -1,4 +1,4 @@
-//! NooBaa's custom bucket path (DECISIONS.md 2026-10-14):  a CreateBucket
+//! NooBaa's custom bucket path:  a CreateBucket
 //! carrying the custom-path header, with a path the owner's allowlist
 //! admits, creates the bucket there.  The header's name is
 //! `rgw_nsfs_custom_bucket_path_header`, by default NooBaa's own,
@@ -19,7 +19,8 @@ use s3_tests_rs::fixtures::{get_new_bucket_name, TestGuard};
 const HEADER: &str = "x-noobaa-custom-bucket-path";
 /* the uid this module's user is bound to under impersonation */
 const UID_CUSTOMPATH: &str = "70101";
-/* I9's fixture users, `rgw-vstart.sh`'s `rgwcopya` and `rgwcopyb`:  no
+/* the identity override's fixture users, `rgw-vstart.sh`'s `rgwcopya`
+ * and `rgwcopyb`:  no
  * other test's rows carry their uids, so the override test's rows cannot
  * disagree with another's on a uid a file names */
 const UID_COPY_A: &str = "70109";
@@ -37,8 +38,8 @@ async fn nsfs_only() -> bool {
 /// the adoption hint, which reports it as `base_path`.
 ///
 /// Not a root buckets live under:  a bucket is found through the
-/// record that places it, and the record carries its path
-/// (archive/NSFS_BUCKET_PLACEMENT_PLAN.md §7).  What this test wants of it is
+/// record that places it, and the record carries its path.  What this
+/// test wants of it is
 /// only that it is a path the gateway can create in, so the allowlist
 /// has something real to admit.
 async fn default_new_buckets_path() -> String {
@@ -103,7 +104,8 @@ async fn test_custom_bucket_path_follows_the_allowlist() {
     /* An allowlist admitting it, and no uid.  Under impersonation nsfs
      * checks the owner's own access to the path before it makes the
      * directory, and an owner whose credentials do not resolve is
-     * denied rather than checked as the gateway (`RGW_NSFS_VADE_MECUM.md` §12, "No authenticated user means refuse").  The
+     * denied rather than checked as the gateway:  with no authenticated
+     * user to check as, the gateway refuses.  The
      * injected case restores the old reading, which admitted it.
      * Without impersonation nothing is checked as anybody, so it is
      * admitted. */
@@ -184,7 +186,7 @@ async fn test_custom_bucket_path_follows_the_allowlist() {
     assert_eq!(outside, 403, "a custom path outside the allowlist was admitted");
 }
 
-/// I9:  an account user's own allowlist admits a custom path under
+/// An account user's own allowlist admits a custom path under
 /// `rgw_nsfs_user_identity_override`, as NooBaa checks the requesting
 /// record's;  without it the account's does.  The user's row admits one
 /// location and the account's another, so each setting admits exactly

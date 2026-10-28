@@ -1,5 +1,5 @@
 //! Supplementary groups through nsswitch:  `rgw_nsfs_dynamic_supplemental_groups`,
-//! NooBaa's `NSFS_ENABLE_DYNAMIC_SUPPLEMENTAL_GROUPS` (I8).
+//! NooBaa's `NSFS_ENABLE_DYNAMIC_SUPPLEMENTAL_GROUPS`.
 //!
 //! With the switch on, an identity row with no group list of its own runs
 //! with the user's Unix groups as nsswitch returns them.  The switch is

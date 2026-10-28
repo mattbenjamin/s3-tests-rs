@@ -4,7 +4,7 @@
 //! the same rule to the bucket's own directory, so the key `/` names an
 //! object there.  It is served, every key made only of slashes reaches
 //! it, and no listing shows it.  nsfs carries that forward for a client
-//! that relies on it (DECISIONS.md 2026-10-13).  It also does not keep
+//! that relies on it.  It also does not keep
 //! its bucket alive, because NooBaa decides a bucket is empty by listing it.
 //!
 //! NooBaa's behaviour, so it passes there too.  Elsewhere `/` is an

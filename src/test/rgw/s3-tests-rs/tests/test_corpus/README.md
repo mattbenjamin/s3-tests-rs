@@ -5,11 +5,10 @@ artifacts, records what S3 says about them, records what the filesystem
 says about them, and asserts the properties that hold of any S3
 implementation.
 
-Comparing two gateways is a later pass.  What this produces is the
-substrate for that comparison.
+Comparing two captures is a separate step, `corpus-compare`
+(`src/bin/corpus-compare.rs`);  what this produces is its input.
 
-The design notes are `docs/NSFS_CORPUS.md` in the nsfs design set;
-this file is the interface.  The end-to-end validation workflow this
+This file is the interface.  The end-to-end validation workflow this
 feeds — stand NooBaa up, generate and ingest, hand off to RGW, verify
 — is `../../scripts/adoption/WORKFLOW.md`.
 
@@ -51,7 +50,7 @@ A second one is designed and **not built**:  artifacts written
 straight to the filesystem, which no gateway produced, plus bulk for
 the scale tier.  Its purpose is provenance an S3 request cannot
 supply — a directory object in their layout, a name a gateway would
-reject.  `docs/NSFS_CORPUS.md` §1 is the design.
+reject.
 
 ---
 
@@ -199,8 +198,8 @@ condition, so neither is an oversight to correct by adding one.
 static artifact set, and names derived from parameters are what make
 two runs against two gateways diff line for line;  mixing concurrent
 traffic in would cost exactly that.  Conversion *while serving* does
-need it, and it belongs to C2b and C7 rather than here.  Revisit when
-C7 is specified.  `docs/NSFS_CORPUS.md` §8.
+need it, and it belongs to a test of conversion under load rather
+than here.
 
 **A golden manifest.**  There is no expected copy in the repository to
 diff against, and there should not be:  it would record what this

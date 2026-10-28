@@ -1,5 +1,5 @@
 //! `/admin/nsfs/abandoned` -- NooBaa records an operator has decided will
-//! not be carried further, and why (DECISIONS.md 2026-10-13).
+//! not be carried further, and why.
 //!
 //! Under its own cap, `nsfs-adoption`:  abandoning lets adoption complete,
 //! and a bucket abandoned before its import is not served once it has, so

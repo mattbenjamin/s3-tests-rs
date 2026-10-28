@@ -1,4 +1,4 @@
-//! A role given a filesystem identity of its own (I9):
+//! A role given a filesystem identity of its own:
 //! `rgw_nsfs_role_identity_override`, NooBaa's documented future -- *"the
 //! role inherits filesystem identity from that account unless overridden
 //! by the role entity"*.
@@ -13,9 +13,9 @@
 //! What the session ran as is what the `ran-as` hint reports for the role
 //! principal, at the attribute write and the delete:  the identity the
 //! driver chose, which is the subject;  whether that identity may then
-//! write is the access model's, and is not asserted.  The account is `rgwcopya`'s uid and the role
-//! `rgwcopyb`'s, `rgw-vstart.sh`'s users for I9, so no other test's rows
-//! share them.
+//! write is the access model's, and is not asserted.  The account is
+//! `rgwcopya`'s uid and the role `rgwcopyb`'s, `rgw-vstart.sh`'s users
+//! for the identity overrides, so no other test's rows share them.
 
 use std::future::Future;
 use std::panic::{resume_unwind, AssertUnwindSafe};

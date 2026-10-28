@@ -5,11 +5,10 @@
 //! three identities:  `[s3 main]` is the NooBaa account, `[s3 alt]` the
 //! IAM user created in it through NooBaa's IAM API, with the key NooBaa
 //! minted for it, and `[iam]` an Admin Ops key on the gateway
-//! (`adoption/standup.rs`, `write_capture_conf`).
+//! (`scripts/adoption/standup.rs`, `write_capture_conf`).
 //!
 //! The import writes a row for the account and one for each IAM user,
-//! the user's own copy of its account's tuple as NooBaa holds it (I9,
-//! DECISIONS 2026-10-27).  Which one the user's requests run as is
+//! the user's own copy of its account's tuple as NooBaa holds it.  Which one the user's requests run as is
 //! `rgw_nsfs_user_identity_override`:  off, the account's, the user's
 //! row kept and not consulted;  on, the user's own.  The test reads the
 //! gateway's setting and expects accordingly, so it passes under either

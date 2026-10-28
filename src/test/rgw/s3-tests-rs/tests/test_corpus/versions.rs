@@ -13,7 +13,6 @@
 //! the comparison this corpus is for -- NooBaa writes the tree, RGW
 //! reads it, RGW converts it, all one tree -- and it is why comparing
 //! two *separately generated* trees would need them masked.
-//! `docs/NSFS_CORPUS.md` §7 records the limit.
 
 use aws_sdk_s3::primitives::ByteStream;
 use s3_tests_rs::client::get_client;

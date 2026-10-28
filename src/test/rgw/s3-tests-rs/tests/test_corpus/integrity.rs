@@ -12,7 +12,7 @@
 //! means reading every object end to end, which is free on a corpus of
 //! a few small objects and close to unacceptable during a field
 //! upgrade.  That is why it lives here and why conversion has no
-//! validation pass:  `DECISIONS.md` 2026-10-09.
+//! validation pass.
 //!
 //! The regime comes from `features::non_md5_etag()`:  the gateway's
 //! report where it makes one, and the suite's own `non_md5_etag`

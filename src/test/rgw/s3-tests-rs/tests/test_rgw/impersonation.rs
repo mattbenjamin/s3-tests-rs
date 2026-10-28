@@ -151,7 +151,7 @@ async fn test_impersonation_isolates_identities() {
 }
 
 /// An nsswitch-resolved identity is served as the user nsswitch resolves
-/// the name to (I7).  `distinguished_name` is what NooBaa passes to
+/// the name to.  `distinguished_name` is what NooBaa passes to
 /// `getpwnam`, so a row carrying `rgwalice` and no ids must run as
 /// 70101.
 ///
@@ -238,7 +238,7 @@ async fn test_impersonation_serves_an_nsswitch_resolved_identity() {
 }
 
 /// An nsswitch-resolved identity creates under its `new_buckets_path` as
-/// the user its name resolves to (I7).  The same check as
+/// the user its name resolves to.  The same check as
 /// `test_new_buckets_path_requires_the_accounts_access`, with alice's
 /// row carrying `distinguished_name` and no ids:  her location is made
 /// for her by the `unplaced-directory` hint, which resolves her by name
@@ -484,7 +484,7 @@ async fn test_data_follows_the_access_model() {
 /// them, and writing beside another is the access model's.
 ///
 /// A key's directories are made by their writer at NooBaa's mode,
-/// `0770` (DECISIONS 2026-10-20), so alice's PUT makes `a/b/` hers.
+/// `0770`, so alice's PUT makes `a/b/` hers.
 /// bob, granted the write by bucket policy, then writes beside her, and
 /// the filesystem denies him creating there whatever the model, because
 /// the directory is hers.  What the gateway does about it is the access
@@ -915,7 +915,8 @@ async fn metadata_statuses(client: &aws_sdk_s3::Client, bucket: &str,
 }
 
 /// A user whose credentials do not resolve is denied a metadata read,
-/// not served it as the gateway (`RGW_NSFS_VADE_MECUM.md` §12, "No authenticated user means refuse").
+/// not served it as the gateway:  with no authenticated user to act
+/// as, the gateway refuses.
 ///
 /// HEAD and the attribute reads reach neither of the data entry points,
 /// so a denial deferred to them served these as the gateway, which
@@ -975,11 +976,13 @@ async fn test_impersonation_denies_metadata_to_unresolved_credentials() {
 }
 
 /// A user whose credentials do not resolve is denied a bucket, not
-/// given one the gateway owns (`RGW_NSFS_VADE_MECUM.md` §12, "No authenticated user means refuse").
+/// given one the gateway owns:  with no authenticated user to act as,
+/// the gateway refuses.
 ///
 /// The gateway makes a client's bucket directory in the base path and
-/// then gives it to its creator (raise site 4).  A creator whose
-/// credentials did not resolve was left a bucket the gateway owned,
+/// then gives it to its creator, raising a capability to do so.  A
+/// creator whose credentials did not resolve was left a bucket the
+/// gateway owned,
 /// holding the name though every operation in it is denied.  The
 /// control is the same create with the identity row in place;  the
 /// injected case, `inject-unresolved-as-gateway` for this user, must see
@@ -1046,9 +1049,8 @@ async fn test_impersonation_denies_a_bucket_to_unresolved_credentials() {
                 directory or its placement row behind");
 }
 
-/// NooBaa's guard on where an account's buckets go, enacted
-/// (DECISIONS.md 2026-10-14):  NooBaa makes a bucket's directory as the
-/// account, so an account that cannot write its `new_buckets_path`
+/// NooBaa's guard on where an account's buckets go, enacted:  NooBaa
+/// makes a bucket's directory as the account, so an account that cannot write its `new_buckets_path`
 /// cannot create there.  nsfs makes the directory as the gateway, so it
 /// checks the account's access as the account before it does.
 ///
@@ -1115,7 +1117,7 @@ async fn test_new_buckets_path_requires_the_accounts_access() {
 /// A raised capability is effective for one call and gone after it,
 /// and cannot be raised while impersonating.
 ///
-/// The raise is the whole of what (n) adds to the gateway's
+/// The raise is the whole of what impersonation adds to the gateway's
 /// authority, and the only site that uses it -- the promote's residue
 /// -- needs a version file owned by a uid no identity row claims, so
 /// no S3 sequence reaches it.  The hint asks the primitive directly
@@ -1350,7 +1352,7 @@ async fn test_the_non_md5_etag_is_recorded_as_the_authenticated_user() {
 }
 
 /* DeleteBucket under impersonation:  who acts at each layer follows
- * who had to be able to create it (DECISIONS.md 2026-10-24).  The
+ * who had to be able to create it.  The
  * bucket directory is checked as the authenticated user;  what is below
  * it is removed as that user;  its entry in a parent the account owns
  * is removed as that user, and in the base path by the gateway.  Under

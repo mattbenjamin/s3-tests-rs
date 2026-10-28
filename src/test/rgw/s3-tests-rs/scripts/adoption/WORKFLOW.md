@@ -1,11 +1,11 @@
 # The corpus validation workflow, end to end
 
 **Who this is for.**  A developer running the adoption validation, or
-taking it over part-built.  Stage letters like C2b are
-`docs/NSFS_WORK_PLAN.md`'s.
+taking it over part-built.
 
-This is the sequence and nothing else;  each step names the document
-that owns its detail rather than restating it.
+This is the sequence and nothing else;  `README.md` beside this file
+owns the stand-up's detail, and `../../tests/test_corpus/README.md` the
+corpus's.
 
 Four steps, all built.  **`standup.rs conversion` runs every one of
 them, in order, stopping at the first failure** -- the conversion
@@ -23,6 +23,10 @@ one that already holds a tree.
 ```
 
 Everything is driven from `scripts/adoption/standup.rs` in the suite.
+`scripts/validate.rs` runs `conversion` in each of the six adoption
+deployments, from a fresh work directory each time;
+`../../docs/validation.md` describes them and how to read the
+result.
 `standup.rs list` prints the steps and the settings;  `ADOPTION_WORK`
 is required and has no default, because it holds the worktree, their
 config store, the tree their gateway writes, and the captures.
@@ -90,10 +94,8 @@ Three things about reading the output:
   expects NooBaa's modes, `0660` for objects and `0770` for directories,
   which both gateways create.
 
-The corpus itself is owned by
-`../../tests/test_corpus/README.md` (the interface) and
-`docs/NSFS_CORPUS.md` in the nsfs design set (the reasoning, including
-the two capture formats in §7).
+The corpus itself is described by `../../tests/test_corpus/README.md`,
+including its two capture formats.
 
 ## 3.  Hand off to RGW
 
@@ -119,8 +121,8 @@ warning about it.
 | `--noobaa-config-root` | their config store, so RGW can read what they wrote |
 | `--adoption-mode command` | the driver's default, said explicitly:  nothing is adopted until asked |
 
-Then `adopt` asks, through Admin Ops as an operator would
-(`NSFS_ADOPTION.md` §7):  the `adoption` driver hint with
+Then `adopt` asks, through Admin Ops as an operator would, since the
+gateway runs in command mode:  the `adoption` driver hint with
 `identities=true` imports the store's accounts, users and keys;  then
 each bucket NooBaa holds a record of is adopted into the shared
 profile, by the hint with `bucket=<name>`, except
@@ -128,8 +130,7 @@ profile, by the hint with `bucket=<name>`, except
 Adopting a bucket imports its NooBaa record, writing its placement row
 from the record's `path`, and rewrites its tree.  Last, the full pass,
 `run=true`, has to report adoption complete, which writes the
-completion record.  `ACCOUNT_IMPORT.md` §6.1 owns what the import does,
-in order.
+completion record.
 
 **What this produces.**  An RGW gateway serving the tree NooBaa wrote,
 with that deployment's accounts, users, identity rows and bucket state
@@ -140,7 +141,7 @@ store is never read again.
 id no identity has, and records it in `$ADOPTION_WORK/damaged.json`.
 `import` and `adopt` skip that bucket, which leaves the escape hatch
 something real to do.  After adopting every other bucket, `adopt`
-exercises it end to end (`NSFS_ADOPTION.md` §7):
+exercises it end to end:
 
 1. the full pass, the `adoption` hint with `run=true`, must fail to
    complete, and the hint must report `complete:  false` — the control;
@@ -160,12 +161,13 @@ Admin Ops as vstart's `[iam]` user unless `rgw_admin_key` says
 otherwise:  the corpus needs it to ask what the IAM user's requests run
 as.
 
-`import` and `adopt` produce the two RGW runs C2b compares
-(`docs/NSFS_WORK_PLAN.md`).  `import` imports the identities
+`import` and `adopt` produce the two RGW runs that `compare` holds
+against NooBaa's and each other.  `import` imports the identities
 and leaves every bucket in NooBaa's format, served with its
 configuration from NooBaa's configuration store
 (`buckets/<name>.json`).  `adopt` adopts every bucket, which writes its
-state, marks it and converts its tree;  `corpus-coverage-copy` goes through the profile endpoint.  When
+state, marks it and converts its tree;  `corpus-coverage-copy` goes
+through the profile endpoint.  When
 the `adoption` hint reports that a gateway already serves this tree,
 `adopt` uses it rather than restarting:  a restart empties the userdb
 and would re-import the identities under new ids, so the two captures
@@ -173,8 +175,10 @@ would see different owners.
 
 Each capture runs the corpus in observe mode.  Besides the axes,
 it checks the imported identities (`test_corpus/identity.rs`):  the
-account's user is its root, and the IAM user has no identity row of
-its own and runs as its account's (`ACCOUNT_IMPORT.md` §2.8).  Its
+account's user is its root, and the IAM user has a row of its own, a
+copy of its account's tuple as NooBaa holds it, and runs as that row
+under `rgw_nsfs_user_identity_override` and as its account's
+otherwise.  Its
 capture conf carries the IAM user as `[s3 alt]` and the Admin Ops key
 as `[iam]` for that.
 
@@ -184,10 +188,9 @@ as `[iam]` for that.
 ./standup.rs compare
 ```
 
-The comparison is C2b of `docs/NSFS_WORK_PLAN.md`:  a
-three-way judgement over the captures, `capture/noobaa`,
+The comparison is three-way, over the captures `capture/noobaa`,
 `capture/rgw-unadopted` and `capture/rgw-converted`, by
-`corpus-compare` (s3-tests-rs, `src/bin/corpus-compare.rs`).  Two pairs
+`corpus-compare` (`../../src/bin/corpus-compare.rs`).  Two pairs
 are compared.  In `noobaa:unadopted` a difference is an adoption
 defect;  in `unadopted:converted` it is a conversion defect.  Every
 difference must be accounted for by a row of `expected-differences.tsv`
@@ -196,8 +199,7 @@ the modality the tree was written with.  It fails on a difference no
 row accounts for, and on one that breaks its row's class.
 
 The RGW sides are captured in observe mode, which writes nothing and
-records what RGW says about the objects NooBaa wrote
-(`docs/NSFS_CORPUS.md`).
+records what RGW says about the objects NooBaa wrote.
 
 ---
 
@@ -208,10 +210,5 @@ records what RGW says about the objects NooBaa wrote
 | `README.md` (here) | the stand-up:  pinning, the worktree, their build, the config store |
 | this file | the sequence, and what each step produces |
 | `../../tests/test_corpus/README.md` | running the corpus, the capture types, adding an axis |
-| `docs/NSFS_CORPUS.md` | why the corpus is shaped as it is;  §7 the two formats |
-| `docs/NSFS_ADOPTION.md` | the adoption model:  §7 the modes, §8 the permission rules, §9 how the work is scheduled |
-| `docs/ACCOUNT_IMPORT.md` | the import:  §6.1 what it does in order, §6.2 failure and re-running |
-| `docs/NSFS_WORK_PLAN.md` | the stages, and which are done |
-| `docs/RGW_FS_DEV_GUIDE.md` §6 | the same ground for a developer who is not doing adoption work |
-
-The `docs/` set is the nsfs design notes, held outside this tree.
+| `expected-differences.tsv` (here) | the differences that are accounted for;  its header says what a row claims |
+| `../../docs/validation.md` | the six adoption deployments `validate.rs` runs, and reading their result |

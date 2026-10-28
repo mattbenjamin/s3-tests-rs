@@ -1,5 +1,4 @@
-//! A symbolic link in a bucket is not an object (DECISIONS.md
-//! 2026-10-23;  ceph-cp `784be57987d`):  it is not listed, a read of its
+//! A symbolic link in a bucket is not an object:  it is not listed, a read of its
 //! name is NoSuchKey, a PUT of its name replaces it, a DELETE of its
 //! name unlinks it and never its target, and it does not keep its bucket
 //! from being deleted.  Adoption counts every link it meets

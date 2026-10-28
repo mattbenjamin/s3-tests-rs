@@ -15,12 +15,18 @@ Targets Ceph RGW (and any S3-compatible endpoint) using the Rust-native AWS SDK.
 
 | module | tests | source |
 |---|---|---|
-| `test_s3` | 752 | `test_s3.py`, `test_headers.py`, `rgw_multi/tests.py` |
-| `test_iam` | 74 | `test_iam.py`, `test_sts.py`, plus new account coverage |
-| `test_rgw` | 31 | original to this project, except `quota.rs` from `s3_user_quota.pl` |
+| `test_s3` | 751 | `test_s3.py`, `test_headers.py`, `rgw_multi/tests.py` |
+| `test_iam` | 75 | `test_iam.py`, `test_sts.py`, plus new account coverage |
+| `test_rgw` | 81 | original to this project, except `quota.rs` from `s3_user_quota.pl` |
 | `test_sns` | 26 | `test_sns.py`, plus the Kafka subset of `test_bn.py` |
-| `test_bench` | 6 | original — `elbencho` automation |
-| `test_corpus` | 13 | original — see `tests/test_corpus/README.md` |
+| `test_bench` | 7 | original — `elbencho` automation |
+| `test_corpus` | 12 | original — see `tests/test_corpus/README.md` |
+
+`STATUS.md` is the count of what is here, what each module was
+translated from, what is gated and why, and what remains unported.
+`docs/validation.md` is how the suite is run to validate RGW's nsfs
+driver:  the deployments, `scripts/validate.rs`, and the adoption
+matrix.
 
 Every module header names what it was translated from, so the correspondence is
 recoverable by reading rather than by asking. Translated tests keep their Python
@@ -171,8 +177,27 @@ cargo nextest run --run-ignored all
 
 ### Run a specific category (nextest profiles)
 
-Profiles are defined in `.config/nextest.toml`. Each runs only the tests in
-the named module:
+Profiles are defined in `.config/nextest.toml`.
+
+**`baseline` is the pre-commit gate** for a filesystem-backed driver:
+everything except lifecycle (slow), bucket logging (not implemented on
+posix or nsfs), stress (ignored), and the tests that switch a
+daemon-wide setting, at eight threads.  Each of those has a profile of
+its own, run after `baseline` against the same gateway:
+
+```bash
+cargo nextest run -P baseline --features fails_on_nsfs,rgw_admin
+cargo nextest run -P access-model-switch --features fails_on_nsfs,rgw_admin
+cargo nextest run -P dynamic-groups --features fails_on_nsfs,rgw_admin
+cargo nextest run -P role-identity --features fails_on_nsfs,rgw_admin
+```
+
+`dynamic-groups-membership` runs one of the `dynamic-groups` tests
+again after a fixture user's group membership changes;
+`scripts/validate.rs` makes the change.  `docs/validation.md` says what
+each switch checks.
+
+The rest each run only the tests in the named module:
 
 ```bash
 cargo nextest run -P bucket-list       # ListObjects v1/v2, delimiters, prefixes
@@ -197,6 +222,14 @@ cargo nextest run -P iam               # IAM user policies
 cargo nextest run -P basic             # bucket-list + object-ops + copy + conditional + cors + acl
 cargo nextest run -P all               # everything, including infra-dependent
 ```
+
+`-P all` runs each daemon-wide switch test alone, holding every test
+thread, so the whole suite in one invocation is safe.
+
+`bench-smoke` and `bench-soak` drive calibrated `elbencho` workloads:
+a quick check under moderate load and a sustained high-thread-count
+run.  Their tests are ignored by default, so run them with
+`--run-ignored=all`;  they need `elbencho` on the host.
 
 ### Run a specific test
 
@@ -297,10 +330,18 @@ cargo nextest run --no-default-features
 
 | Feature | Default | Tests skipped | Notes |
 |---|---|---|---|
-| `fails_on_rgw` | **yes** | ~8 | RGW-specific failures |
-| `fails_on_aws` | no | ~130 | Behaviors that differ from AWS (includes bucket logging) |
-| `fails_on_dbstore` | no | ~178 | Features not supported by dbstore |
-| `fails_on_nsfs` | no | 2 | Hierarchical namespace: file-as-prefix conflict (see below) |
+| `fails_on_rgw` | **yes** | 19 | RGW-specific failures |
+| `fails_on_aws` | no | 59 | Behaviors that differ from AWS (includes bucket logging) |
+| `fails_on_dbstore` | no | 223 | Features not supported by dbstore |
+| `fails_on_posix` | no | 167 | Features not supported by the posix driver |
+| `fails_on_nsfs` | no | 86 | Not supported by nsfs, including the file-as-prefix conflict (see below) |
+| `fails_on_rados` | no | 17 | A filesystem driver's own S3 behaviour, on RGW over RADOS |
+| `fails_on_noobaa` | no | 3 | NooBaa's gateway;  set by `scripts/adoption/standup.rs capture` |
+
+Two features enable tests rather than skipping them:  `rgw_admin`, for
+tests that call Admin Ops endpoints and driver hints, and `has_vault`,
+for a Vault sidecar.  The nsfs gate is `--features fails_on_nsfs,rgw_admin`.
+`STATUS.md` has the counts and how they are taken.
 
 #### nsfs file-as-prefix limitation
 
@@ -320,30 +361,13 @@ nsfs implementation, which uses the same hierarchical mapping, has the
 same limitation.  Tests tagged `fails_on_nsfs` exercise key patterns
 that trigger this conflict.
 
-## Test counts by module
+## Validating RGW's nsfs driver
 
-| Module | Active | Ignored | Total |
-|---|---|---|---|
-| `bucket_list` | 94 | 0 | 94 |
-| `object_ops` | 87 | 7 | 94 |
-| `acl` | 51 | 6 | 57 |
-| `object_lock` | 39 | 0 | 39 |
-| `post_object` | 37 | 0 | 37 |
-| `multipart` | 35 | 1 | 36 |
-| `bucket_policy` | 36 | 5 | 41 |
-| `lifecycle` | 40 | 0 | 40 |
-| `conditional` | 33 | 0 | 33 |
-| `versioning` | 29 | 0 | 29 |
-| `encryption` | 24 | 10 | 34 |
-| `test_iam` | 19 | 7 | 26 |
-| `cors` | 23 | 0 | 23 |
-| `headers` | 13 | 8 | 21 |
-| `signing` | 17 | 0 | 17 |
-| `copy` | 15 | 3 | 18 |
-| `tagging` | 16 | 0 | 16 |
-| `bucket_logging` | 107 | 1 | 108 |
-| `test_sns` | 4 | 0 | 4 |
-| **Total** | **719** | **48** | **767** |
+`docs/validation.md` covers the deployment semantics matrix, the
+twelve gateway deployments a change to the driver is validated
+against;  `scripts/validate.rs`, which runs them with one `sudo`
+password;  and the adoption matrix, in which NooBaa writes a tree and
+RGW is held to what NooBaa served from it.
 
 ## Infrastructure constraints
 
@@ -393,7 +417,19 @@ s3-tests-rs/
     http.rs                  #   raw HTTP, SigV2/V4 signing, POST form uploads
     policy.rs                #   JSON policy builder for bucket policy tests
     random.rs                #   chunked random data generator
+    admin.rs                 #   Admin Ops and driver-hint requests
+    features.rs              #   what the gateway under test implements (GET /admin/features)
+    hints.rs                 #   driver hints, put back when the test ends
+    access_model.rs          #   the nsfs access model's invariant, for any test to assert
+    corpus/                  #   the conversion corpus's shared code
+    bin/corpus-compare.rs    #   compares two corpus captures
+  scripts/
+    validate.rs              # runs the suite across the nsfs deployments
+    adoption/                # stands NooBaa up for the conversion corpus
   tests/
+    test_rgw/                # RGW's own extensions:  nsfs, identity, Admin Ops
+    test_corpus/             # the conversion corpus
+    test_bench/              # elbencho workloads
     test_s3/                 # S3 API tests (18 modules, plus test_sns and test_iam)
       bucket_list.rs         #   list objects v1/v2, delimiters, prefixes, pagination
       object_ops.rs          #   CRUD, range requests, metadata, bucket naming
@@ -419,6 +455,7 @@ s3-tests-rs/
   .config/
     nextest.toml             # nextest profiles and setup script
   docs/
+    validation.md            # validating the nsfs driver, and the adoption matrix
     architecture-plan.md     # original architecture design
     translation-status.md    # module-by-module translation status
     sdk-limitations.md       # SDK limitations and bypass strategies

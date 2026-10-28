@@ -2,8 +2,8 @@
 //!
 //! `.folder` is where a directory object's content is stored -- the key
 //! `x/` lives in `x/.folder` -- and `.versions` holds version entries.
-//! Those names are schema, so no S3 operation reaches them by name
-//! (DECISIONS.md 2026-10-12).  A lookup of such a key is NoSuchKey, a
+//! Those names are schema, so no S3 operation reaches them by name.
+//! A lookup of such a key is NoSuchKey, a
 //! delete deletes nothing, and a create is InvalidObjectName.  A key of
 //! slashes alone is not one of them:  it is the root object
 //! (`root_object.rs`).

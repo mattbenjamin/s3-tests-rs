@@ -44,8 +44,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Where everything lives.  Every one is overridable, because the
 /// pin in particular is a hypothesis rather than a fact -- see
-/// `docs/NSFS_WORK_PLAN.md` on which commit a shipped 5.23
-/// corresponds to.
+/// "The pin is a hypothesis" in `README.md` beside this file.
 struct Env {
     /// the developer's own clone, read only -- never checked out
     src: PathBuf,
@@ -106,7 +105,7 @@ struct Env {
     /// `work/modality` and the later steps read that rather than this,
     /// so changing the setting cannot relabel an existing tree.
     md5: bool,
-    /// whether RGW serves the tree impersonating -- (n) Phase G.  NooBaa
+    /// whether RGW serves the tree impersonating.  NooBaa
     /// then runs as root, as an installation's does, with its account
     /// at vstart's fixture ids, so the tree is account-owned at
     /// NooBaa's modes;  the corpus captures it as the account, and the
@@ -114,7 +113,7 @@ struct Env {
     impersonate: bool,
     /// the access model RGW is started with under `impersonate`
     access_model: String,
-    /// `rgw_nsfs_user_identity_override` for the gateway (I9), checked
+    /// `rgw_nsfs_user_identity_override` for the gateway, checked
     /// against what it reports once it is up
     user_identity_override: bool,
 }
@@ -474,7 +473,7 @@ fn pin(env: &Env) -> Result<(), String> {
      * confirmed. */
     if env.pin.starts_with("08d063f8") {
         println!("         NOTE: this is the 5.23 window *start*, a hypothesis");
-        println!("               and not a confirmed pin.  See the work plan.");
+        println!("               and not a confirmed pin.  See README.md.");
     }
     Ok(())
 }
@@ -793,7 +792,7 @@ fn config(env: &Env) -> Result<(), String> {
         println!("         account {:?} created, with role {:?}", env.account, env.role);
     }
 
-    /* The nsswitch-resolved account (I7):  NooBaa's `distinguished_name`, which
+    /* The nsswitch-resolved account:  NooBaa's `distinguished_name`, which
      * it passes to getpwnam, naming the account's own uid, so both
      * gateways resolve it through nsswitch and the tree stays the
      * account's to write in.  Its bucket is made here, as the others
@@ -826,7 +825,7 @@ fn config(env: &Env) -> Result<(), String> {
         println!("         bucket {NSSWITCH_BUCKET:?} created at {np}, for `nsswitch`");
     }
 
-    /* The `groups` step's accounts and bucket (I8), under `impersonate`:
+    /* The `groups` step's accounts and bucket, under `impersonate`:
      * two list-less accounts, one as a user `rgwfix` holds and one as a
      * user it does not, and a bucket whose directory is a third uid's,
      * group `rgwfix`, `0770`, so only membership grants a write. */
@@ -870,7 +869,7 @@ fn config(env: &Env) -> Result<(), String> {
                       ({owner}:{group}, 0770), for `groups`");
         }
 
-        /* The `copy` step's accounts (I9):  each as the first of its
+        /* The `copy` step's accounts:  each as the first of its
          * users, with a new_buckets_path of that user's, so the IAM user
          * `copy` makes in it copies both;  `copy` then moves the account
          * to the second.  The paths are outside the tree:  its root is
@@ -904,7 +903,7 @@ fn config(env: &Env) -> Result<(), String> {
     /* The anonymous account, which NooBaa creates only when asked:  the
      * POSIX identity an unauthenticated request runs as.  A deployment
      * that serves public buckets has one, and the import writes it as an
-     * identity row and nothing else (ACCOUNT_IMPORT.md §6.8) -- a record
+     * identity row and nothing else -- a record
      * shape and a branch no other record reaches.  Without it here only
      * synthetic fixtures would cover either.  The account's ids, so
      * the identity it names exists. */
@@ -936,7 +935,7 @@ fn config(env: &Env) -> Result<(), String> {
          * `user.content_md5` and their ETag is a file-instance token
          * that witnesses no bytes.  With it on the ETag is a digest,
          * which is the only modality in which the suite has anything
-         * to validate.  DECISIONS.md 2026-10-09. */
+         * to validate. */
         let bp = bucket_path.display().to_string();
         let mut add: Vec<&str> = vec![
             "bucket", "add",
@@ -980,7 +979,7 @@ fn config(env: &Env) -> Result<(), String> {
 
     /* NooBaa's dynamic supplementary groups, under `impersonate` only:
      * NooBaa unprivileged cannot install groups, so the unimpersonated
-     * tree is written without them (I8;  `groups`). */
+     * tree is written without them (the `groups` step). */
     let cfg = env.config_root().join("config.json");
     let text = if env.impersonate {
         "{\n    \"ALLOW_HTTP\": true,\n    \"NSFS_ENABLE_DYNAMIC_SUPPLEMENTAL_GROUPS\": true\n}\n"
@@ -1155,7 +1154,7 @@ fn serve(env: &Env) -> Result<(), String> {
 /// cannot address one -- so this is the one way to get an IAM user that
 /// *they* wrote, carrying the fields their code copies into it:
 /// `owner`, `iam_path`, and a copy of the account's
-/// `nsfs_account_config` (ACCOUNT_IMPORT.md §2.8).
+/// `nsfs_account_config`.
 ///
 /// Signed by `curl --aws-sigv4` rather than an SDK, because this
 /// driver has no dependencies and curl is already on every host it
@@ -1294,7 +1293,7 @@ fn role_noobaa(env: &Env) -> Result<(), String> {
 ///
 /// The ARN is RGW's, `arn:aws:iam::<account id>:role/<name>`, learned
 /// as a client learns it, from IAM GetRole;  that is what clients move
-/// to at adoption (DECISIONS.md 2026-10-26);  NooBaa's
+/// to at adoption;  NooBaa's
 /// access-key form is not carried, and that is checked too.  Under
 /// `rgw_nsfs_adoption_role_rights=account`, the default, the session has
 /// the account's rights, so a write to its bucket succeeds;  the object is
@@ -1347,7 +1346,7 @@ fn role_rgw(env: &Env) -> Result<(), String> {
     Ok(())
 }
 
-/// Write through `rgwfix` as list-less accounts (I8).
+/// Write through `rgwfix` as list-less accounts.
 ///
 /// Under NooBaa's dynamic supplementary groups a list-less account runs
 /// with its user's Unix groups, and so must it under RGW with
@@ -1485,7 +1484,7 @@ fn copy_credentials(env: &Env, account: &str) -> PathBuf {
     env.work.join(format!("{account}-user-credentials"))
 }
 
-/// A user whose account moved after the user was made (I9).
+/// A user whose account moved after the user was made.
 ///
 /// NooBaa's CreateUser copies the account's `nsfs_account_config`, and
 /// nothing updates the copy, so a user made before `account update`
@@ -1671,8 +1670,8 @@ fn vstart_id(env: &Env, var: &str) -> Result<u32, String> {
 
 /// Write as the nsswitch-resolved account, and check whose the file is.
 ///
-/// NooBaa resolves `distinguished_name` with getpwnam, and so must RGW
-/// (I7), so a file either writes is owned by that name's uid and primary
+/// NooBaa resolves `distinguished_name` with getpwnam, and so must RGW,
+/// so a file either writes is owned by that name's uid and primary
 /// gid -- the comparison between the two gateways that an nsswitch-resolved
 /// identity is about.  Against NooBaa while it runs, before `stop`;
 /// against RGW otherwise, after `role-rgw`, where the object NooBaa wrote
@@ -1809,8 +1808,7 @@ fn iam_call_as(env: &Env, ak: &str, sk: &str, params: &[(&str, &str)])
 /// means the corpus never reached a write.
 ///
 /// **The corpus's mode checks run on both sides.**  nsfs creates in
-/// NooBaa's modes, 0660 files and 0770 directories (DECISIONS.md
-/// 2026-10-11), so a tree NooBaa wrote and the same tree after RGW
+/// NooBaa's modes, 0660 files and 0770 directories, so a tree NooBaa wrote and the same tree after RGW
 /// adopted it are held to the one expectation.
 ///
 /// Idempotent:  the artifacts are rewritten, and the buckets the
@@ -2372,8 +2370,7 @@ fn store_tests(env: &Env) -> Result<(), String> {
     Ok(())
 }
 
-/// Hold the nsfs driver's record schema to NooBaa's own validator (X4's
-/// second layer).
+/// Hold the nsfs driver's record schema to NooBaa's own validator.
 ///
 /// Every account and bucket record NooBaa wrote here, after the corpus
 /// has made its buckets, goes through `schema-agreement.js`, which runs
@@ -2384,8 +2381,7 @@ fn store_tests(env: &Env) -> Result<(), String> {
 /// tree is checked against NooBaa, not against a reading of its schema.
 /// `ObjectAttributesAgreeWithWhatNooBaaWrote` then reads the NooBaa
 /// capture's inventories and requires every `user.noobaa.*` name on an
-/// object to be one the driver's attribute table knows (X4's third
-/// layer).
+/// object to be one the driver's attribute table knows.
 fn schema_agreement(env: &Env) -> Result<(), String> {
     let Some(build) = env.ceph_build.as_ref() else {
         return Err("`ceph_build` is not set;  `schema-agreement` runs the nsfs \
@@ -2975,8 +2971,7 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
     }
 
     /* Every bucket is adopted, so a full pass observes the store
-     * consumed and writes the completion record (DECISIONS.md
-     * 2026-10-13).  Required here, because a pass that does not write it
+     * consumed and writes the completion record.  Required here, because a pass that does not write it
      * has found something the per-bucket adoption above missed. */
     if step == "adopt" {
         if let Some(id) = &damaged {
@@ -3008,10 +3003,10 @@ const GROUPS_ACCOUNTS: [(&str, &str, &str); 2] = [
 const GROUPS_SECRET: &str = "adoptiongroupssecretkeyadoptiongroupssec";
 /// The `groups` step's bucket.  Not a corpus bucket.
 const GROUPS_BUCKET: &str = "groups";
-/// The `copy` step's fixture users (I9), `rgw-vstart.sh`'s own for it:
+/// The `copy` step's fixture users, `rgw-vstart.sh`'s own for it:
 /// in no gating group, and carried by no other test's rows.
 const COPY_USERS: (&str, &str) = ("rgwcopya", "rgwcopyb");
-/// The `copy` step's accounts (I9):  NooBaa name, whether it is
+/// The `copy` step's accounts:  NooBaa name, whether it is
 /// nsswitch-resolved (`--user`) or numeric, its access key, and the IAM
 /// user made in it.  Each starts as `rgwcopya` and is moved to `rgwcopyb`
 /// after its user is made, so the user's copy keeps `rgwcopya`.
@@ -3079,10 +3074,9 @@ fn reply_json(what: &str, body: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(body).map_err(|e| format!("{what}:  not JSON ({e}):\n{body}"))
 }
 
-/// The escape hatch, end to end against the live gateway (DECISIONS.md
-/// 2026-10-14):  the damaged record blocks completion, it is abandoned
-/// with a reason, and the listing shows it.  `adopt` then requires the
-/// full pass to complete.
+/// The escape hatch, end to end against the live gateway:  the damaged
+/// record blocks completion, it is abandoned with a reason, and the
+/// listing shows it.  `adopt` then requires the full pass to complete.
 fn escape_hatch(env: &Env, admin: &str, hint: &str, id: &str) -> Result<(), String> {
     let base = format!("http://127.0.0.1:{}", env.rgw_port);
 

@@ -4,9 +4,8 @@
 //! suite already is an enumeration of S3 features and already carries
 //! the client, the config and the recipe primitives.  Its output is a
 //! set of artifacts on a gateway and a line-oriented manifest of what
-//! S3 says about them;  comparing two gateways is a later pass.
-//!
-//! `docs/NSFS_CORPUS.md` in the nsfs design notes is the design.
+//! S3 says about them;  comparing two captures is `corpus-compare`'s.
+//! `README.md` beside this file is the interface.
 //!
 //! **Nothing it produces is committed.**  The manifests and
 //! inventories are output, regenerable by definition, and there is no

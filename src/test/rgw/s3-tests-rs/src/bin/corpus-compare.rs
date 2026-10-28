@@ -5,10 +5,10 @@
 //! ```
 //!
 //! `<capture-root>` holds `noobaa/`, `rgw-unadopted/` and
-//! `rgw-converted/`, as `adoption/standup.rs` writes them.  Two pairs are
-//! compared:  `noobaa:unadopted`, where a difference no row accounts
-//! for is an adoption defect, and `unadopted:converted`, where it is a
-//! conversion defect.  The rules are `s3_tests_rs::corpus::compare`.
+//! `rgw-converted/`, as `scripts/adoption/standup.rs` writes them.  Two
+//! pairs are compared:  `noobaa:unadopted`, where a difference no row
+//! accounts for is an adoption defect, and `unadopted:converted`, where
+//! it is a conversion defect.  The rules are `s3_tests_rs::corpus::compare`.
 //!
 //! Exits 1 if any difference is unexpected or breaks its row's class, 3
 //! if the only failures are known defects (`known` rows), 2 if the

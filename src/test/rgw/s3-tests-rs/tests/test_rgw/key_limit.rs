@@ -8,8 +8,8 @@
 //! This pins the rejection while the limit stands.  When LMDB is built with
 //! a larger key size it fails, and so marks
 //! `test_s3::object_ops::test_object_key_at_the_s3_maximum_is_stored_and_listed`
-//! for ungating (PUNCHLIST.md, OPEN:  "one over-long name in a foreign
-//! tree empties the whole listing").
+//! for ungating.  Until then a key over the limit, in a tree another
+//! gateway wrote, empties that bucket's whole listing.
 
 use aws_sdk_s3::primitives::ByteStream;
 use s3_tests_rs::client::get_client;

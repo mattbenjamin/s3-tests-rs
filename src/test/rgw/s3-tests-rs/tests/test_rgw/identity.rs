@@ -34,7 +34,7 @@ async fn nsfs_only() -> bool {
     }
 }
 
-/// The gateway's `rgw_nsfs_user_identity_override` (I9), read and not
+/// The gateway's `rgw_nsfs_user_identity_override`, read and not
 /// changed:  it is daemon-global and these tests run beside others.
 /// A gateway without the hint is one without the override.
 async fn user_identity_override() -> bool {
@@ -616,7 +616,7 @@ async fn test_credentials_for_another_identity() {
 /// two differ: `get_aclowner()` reports the account, `s->user`
 /// reports that user.
 ///
-/// Which row wins is `rgw_nsfs_user_identity_override` (I9):  on, a
+/// Which row wins is `rgw_nsfs_user_identity_override`:  on, a
 /// row keyed on the user takes precedence where one exists, as NooBaa
 /// serves an IAM user from its own record;  off, the user runs as its
 /// account whatever rows exist.  The test reads the gateway's setting
@@ -741,12 +741,11 @@ async fn test_credentials_of_a_user_in_an_account() {
 
 /// An attribute write and a delete run as the **user**, not as its
 /// account -- under `rgw_nsfs_user_identity_override`;  without it,
-/// as the account, whatever row the user has (I9).  The test reads
+/// as the account, whatever row the user has.  The test reads
 /// the gateway's setting and expects accordingly.
 ///
-/// (n) phase D's validation clause.  Phase C plumbed the
-/// authenticated user to `DeleteOp` and the attribute setters, and
-/// nothing asserted that the *right* one arrives:  the compiler
+/// The driver is handed the authenticated user for `DeleteOp` and
+/// the attribute setters, and nothing else asserts that the *right* one arrives:  the compiler
 /// catches a missing identity, not a wrong one, so a later refactor
 /// can collapse a user onto its account in silence and every status
 /// code stays 200.
@@ -986,7 +985,7 @@ async fn test_attrs_and_delete_run_as_the_account_user() {
 ///
 /// With impersonation on, a request whose identity has no record is
 /// denied before any file is opened -- correctly, since no identity
-/// means denial ((n) 6.1).  The denial lands on whatever test happens
+/// means denial.  The denial lands on whatever test happens
 /// to use that principal, as an `AccessDenied` that looks like the
 /// thing the test was checking, so the cause has been found three
 /// times by excavation rather than by being told:  the tenanted user
@@ -1058,7 +1057,7 @@ async fn test_every_principal_is_provisioned() {
         missing.join("\n  "));
 }
 
-/// A role's identity row (I9):  `role=<role id>` in place of `identity=`
+/// A role's identity row:  `role=<role id>` in place of `identity=`
 /// on the identity endpoint, keyed `role:<id>`, apart from every owner's.
 /// The role is RGW's, made here through IAM;  the row is the identity it
 /// is given.  An owner key that begins `role:` is refused, so a role's
