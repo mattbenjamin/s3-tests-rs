@@ -8,16 +8,26 @@ implementation.
 Comparing two captures is a separate step, `corpus-compare`
 (`src/bin/corpus-compare.rs`);  what this produces is its input.
 
-This file is the interface.  The end-to-end validation workflow this
-feeds — stand NooBaa up, generate and ingest, hand off to RGW, verify
-— is `../../scripts/adoption/WORKFLOW.md`.
+This file is the interface, and the reasoning behind its shape.  The
+end-to-end validation workflow this feeds — stand NooBaa up, generate
+and ingest, hand off to RGW, verify — is
+`../../scripts/adoption/WORKFLOW.md`.
+
+**Why a modality of the suite.**  A declarative spec of what to write
+would need its own completeness argument, with nothing behind it but
+that we wrote it;  the suite is already the enumeration of S3 features,
+maintained by work that happens anyway.  Nor is it the suite run with
+cleanup off:  a test leaves the artifacts its assertion needed, so
+coverage of on-disk shapes would be accidental, and its names are
+random, which makes a capture impossible to diff.  The suite's
+primitives are the asset;  its test cases are not.
 
 ---
 
 ## Running it
 
 ```sh
-S3TEST_CONF=~/dev/rgw/s3tests.conf \
+S3TEST_CONF=/path/to/s3tests.conf \
 CORPUS_OUT=/tmp/corpus \
 CORPUS_DATA_ROOT=<build>/dev/rgw/nsfs/root \
   cargo test --test test_corpus -- --test-threads=1
@@ -85,7 +95,21 @@ let problems = inv.check_object_modes();
 Mode, type, uid, gid, size and **extended attribute names** for every
 entry under a root, same line discipline.  No timestamps and no inode
 numbers: they differ on every run and carry nothing the comparison
-wants.
+wants.  Names and not values:  the values are what the manifest
+covers, and the inventory answers what S3 cannot -- whether anything
+NooBaa-spelled remains, and whether a created file got the ownership
+and mode it should have.
+
+**Structured values are recorded as a digest.**  A bucket policy,
+lifecycle rules or CORS are JSON whose formatting carries no meaning,
+so `policy.sha256` over the canonical form compares exactly and says
+"go look" when it differs.
+
+**What the format cannot compare:  version ids across two trees.**
+They are inode-derived, so they compare exactly within one tree --
+NooBaa writes it, RGW reads it, RGW converts it, which is the
+comparison this is for -- and would need masking to compare two trees
+generated separately.
 
 Three defects this half found that the manifest structurally could
 not: a zero-length object at mode 0700, every completed multipart
@@ -108,6 +132,45 @@ bucket's configuration lives on the bucket directory, so that needs
 when asking whether something was persisted: a configuration folded
 into an existing blob adds no attribute *name*, and a names-only
 comparison reads that as "stored nowhere".
+
+## Three tiers
+
+**Coverage**:  one artifact per value of every axis, so each reader
+meets each shape at least once.  Minutes;  the default.
+
+**Interaction**:  pairwise over the shape axes, because defects
+cluster in pairs, plus the named shapes below, which a generator would
+not pick.
+
+**Scale**:  a multiplier over one representative shape, not over the
+matrix.  Its job is measurement -- the cost of a first listing, of a
+walk, of conversion -- and a million of the cheapest object teaches
+that;  a million of every shape teaches nothing more for a thousand
+times the runtime.
+
+## Named shapes, and what is carried forward
+
+Cases a generator would not pick, named because there is evidence they
+matter:
+
+- **A key that is both an object and a prefix**:  `foo` and `foo/bar`.
+  NooBaa's layout produces it as a directory object;  nsfs cannot write
+  it (409 `KeyPathConflict`) but adopts and serves it, which no unit
+  test can show.
+- **Reserved names**:  `.folder`, a key under `.versions/`, a name
+  starting `.noobaa-nsfs`.  NooBaa's listing hides those three and
+  nothing else, two of them as defects;  nsfs reserves its own
+  scaffolding names, and the corpus asserts nsfs's behaviour, not
+  NooBaa's.  The key `/` is the root object in both.
+- **Degenerate buckets**:  empty;  holding only `.versions/` entries;
+  holding only an upload in flight.
+
+**A filesystem object with no S3 meaning is carried forward**, left on
+disk untouched.  Conversion classifies each entry without following
+links and enqueues only directories and regular files, so a fifo, a
+socket or a device node is skipped and never opened.  A symbolic link
+is not an object in nsfs:  it is not listed, and adoption reports each
+one.
 
 ## The parameter space
 
@@ -207,3 +270,51 @@ implementation happened to do, enshrining whatever defects were in the
 first run's output as the expected result.  What an axis asserts
 instead are properties true of any S3 implementation, and comparisons
 are between two captures — never against a file in the tree.
+
+---
+
+## What it has found
+
+Every one by an invariant or by reading a capture, none by a golden
+file;  each is fixed unless it says otherwise.
+
+- a key over the listing cache's 510 bytes was written and never
+  listed;  it is refused now (`KeyTooLongError`), and one already in a
+  NooBaa tree empties its bucket's listing -- the known defect, fixed by
+  a larger cache key size
+- a key colliding with a reserved name was accepted
+- `foo/bar` then `foo/bar/xyzzy` answered 500, now 409
+- conversion's sentinel was created more permissive than any object,
+  and files were created `0700` and narrowed only on the data path --
+  found by the inventory's mode column
+- conversion never descended into `.versions/`, so a NooBaa delete
+  marker stopped reading as one and the object it deleted came back
+- on a warm listing cache a demoted version listed as zero-length,
+  with no ETag and no owner -- found only by running the corpus twice
+  against one gateway
+- a copy into an unversioned bucket never reached the listing cache
+- a bucket's default retention was not applied at PUT
+- an observe-mode capture wrote to the tree, through the bucket
+  configuration axis
+
+## Where a bucket's configuration is stored
+
+Measured by `buckets.rs`, which applies each configuration alone and
+reads the bucket directory's attributes before and after.  It is what
+a conversion has to carry across.
+
+| configuration | what it writes on the bucket |
+|---|---|
+| tagging | `user.nsfs.rgw.x-amz-tagging` |
+| CORS | `user.nsfs.rgw.cors` |
+| policy | `user.nsfs.rgw.iam-policy` |
+| lifecycle | `user.nsfs.rgw.lc` |
+| default encryption | `user.nsfs.rgw.sse-s3.policy` |
+| request payment | `user.nsfs.bucket_info`, modified in place |
+| logging | `user.nsfs.rgw.logging`, `user.nsfs.rgw.logging-mtime` |
+
+Versioning and object lock are measured by their own axes.  Logging
+needs a target bucket that carries a policy, not only one that exists:
+S3 grants the log-delivery service `s3:PutObject` on it, and RGW
+enforces that, so a bare target is a correct 403.  nsfs stores the
+configuration and does not deliver logs.
