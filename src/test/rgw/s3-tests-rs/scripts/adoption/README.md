@@ -115,14 +115,12 @@ should be a no-op, not an error.
 
 `08d063f86` is *"Bumping version from 5.22.0 to 5.23.0"* — the **start**
 of the window in which noobaa-core carried the 5.23 version string.
-Whether IBM Storage Scale ships that surface is an open question with
-the Scale team;  the standing estimate is 85% that it is the window
-start rather than something later in it.  5.23 has no branch and no
-tag, so there is nothing more precise to point at.
+Which commit in that window a shipped 5.23 corresponds to is not
+confirmed.  5.23 has no branch and no tag, so there is nothing more
+precise to point at.
 
 `standup.rs pin` says so on every run, which is cheaper than someone
-rediscovering it.  See `feedback_derive_from_shipped_noobaa` and
-`project_scale_team_questions` in the design notes.
+rediscovering it.
 
 ## Three things this driver got wrong first, now settled
 
