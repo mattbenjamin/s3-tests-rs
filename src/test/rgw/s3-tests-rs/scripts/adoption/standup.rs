@@ -44,8 +44,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Where everything lives.  Every one is overridable, because the
 /// pin in particular is a hypothesis rather than a fact -- see
-/// `docs/NSFS_WORK_PLAN.md` and the Scale team question
-/// about which commit 5.23 actually ships.
+/// `docs/NSFS_WORK_PLAN.md` on which commit a shipped 5.23
+/// corresponds to.
 struct Env {
     /// the developer's own clone, read only -- never checked out
     src: PathBuf,
@@ -469,9 +469,9 @@ fn pin(env: &Env) -> Result<(), String> {
 
     /* The pin is a hypothesis, and saying so here is cheaper than
      * someone rediscovering it.  08d063f86 is the *start* of the
-     * window in which noobaa-core carried the 5.23 version string;
-     * whether Scale ships that surface is an open question with the
-     * Scale team, and Matt's standing estimate is 85%. */
+     * window in which noobaa-core carried the 5.23 version string,
+     * and which commit in it a shipped 5.23 corresponds to is not
+     * confirmed. */
     if env.pin.starts_with("08d063f8") {
         println!("         NOTE: this is the 5.23 window *start*, a hypothesis");
         println!("               and not a confirmed pin.  See the work plan.");
