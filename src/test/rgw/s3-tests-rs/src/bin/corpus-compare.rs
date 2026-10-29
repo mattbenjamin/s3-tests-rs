@@ -8,7 +8,11 @@
 //! `rgw-converted/`, as `scripts/adoption/standup.rs` writes them.  Two
 //! pairs are compared:  `noobaa:unadopted`, where a difference no row
 //! accounts for is an adoption defect, and `unadopted:converted`, where
-//! it is a conversion defect.  The rules are `s3_tests_rs::corpus::compare`.
+//! it is a conversion defect.  A third, `noobaa:rgw-notify`, holds the
+//! events the `notify` step captured from each gateway, `notify-noobaa/`
+//! against `notify-rgw/`, where a difference no row accounts for is one
+//! a consumer of NooBaa's notifications would meet;  it is skipped where
+//! neither was captured.  The rules are `s3_tests_rs::corpus::compare`.
 //!
 //! Exits 1 if any difference is unexpected or breaks its row's class, 3
 //! if the only failures are known defects (`known` rows), 2 if the
@@ -24,9 +28,10 @@ use std::process::ExitCode;
 use s3_tests_rs::corpus::compare::{differences, evaluate, parse_rows, Capture, Class,
                                    Difference, Outcome};
 
-const PAIRS: [(&str, &str, &str, &str); 2] = [
+const PAIRS: [(&str, &str, &str, &str); 3] = [
     ("noobaa:unadopted", "adoption", "noobaa", "rgw-unadopted"),
     ("unadopted:converted", "conversion", "rgw-unadopted", "rgw-converted"),
+    ("noobaa:rgw-notify", "notification", "notify-noobaa", "notify-rgw"),
 ];
 
 fn show(v: &Option<std::collections::BTreeSet<String>>) -> String {
@@ -63,6 +68,10 @@ fn main() -> ExitCode {
     let mut known_only = false;
     let mut used: BTreeMap<usize, usize> = BTreeMap::new();
     for (pair, kind, l, r) in PAIRS {
+        if kind == "notification" && !Path::new(root).join(l).exists()
+            && !Path::new(root).join(r).exists() {
+            continue;
+        }
         let read = |d: &str| Capture::read(&Path::new(root).join(d));
         let (left, right) = match (read(l), read(r)) {
             (Ok(a), Ok(b)) => (a, b),

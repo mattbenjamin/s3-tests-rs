@@ -47,6 +47,7 @@ file it read.
 | `ADOPTION_CEPH_BUILD` | **required for `adopt`.**  the ceph build directory;  `rgw-vstart.sh` is found in the source tree its `CMakeCache.txt` names |
 | `ADOPTION_SUITE` | the s3-tests-rs checkout;  defaults to two levels up from this driver |
 | `ADOPTION_TIER` | which corpus tier `capture` runs |
+| `ADOPTION_NOTIFY_PORT` | where `notify` listens for both gateways' notifications;  default 9101 |
 | `ADOPTION_ADOPT_BY` | what adopts the tree at `adopt`:  `command` (the default), the commands one bucket at a time;  `automatic`, the import's gateway restarted in `automatic` mode;  `promotion`, the import's gateway switched to `automatic` by the `adoption` hint, with the promotion checks.  See `WORKFLOW.md` |
 
 ## What `capture` produces
