@@ -18,6 +18,9 @@ sha2 = "0.10"
 # the corpus digests the bodies it reads, to validate a digest ETag
 # against content;  RustCrypto sibling of sha2 above
 md-5 = "0.10"
+# the notification tests compare an object's ETag with its content's
+# MD5;  already in the lock graph by way of the aws sdk
+hex = "0.4"
 tokio = { version = "1", features = ["full"] }
 # FutureExt::catch_unwind, so a driver hint is cleared on the
 # panicking path as well (src/hints.rs);  already in the lock

@@ -14,10 +14,10 @@ Four kinds of work, six modules.
 | `test_s3` | 751 | `test_s3.py`, `test_headers.py`, `rgw_multi/tests.py` |
 | `test_iam` | 75 | `test_iam.py`, `test_sts.py`, plus new account coverage |
 | `test_rgw` | 81 | original, except `quota.rs` from `s3_user_quota.pl` |
-| `test_sns` | 26 | `test_sns.py`, plus the Kafka subset of `test_bn.py` |
+| `test_sns` | 31 | `test_sns.py`;  the HTTP subset of `test_bn.py`;  Kafka scenarios derived from it |
 | `test_bench` | 7 | original — `elbencho` workload automation |
 | `test_corpus` | 12 | original — the conversion corpus |
-| **total** | **952** | |
+| **total** | **957** | |
 
 The Python sources are the s3-tests suite vendored in the Ceph tree at
 `src/test/rgw/s3-tests/`;  `test_bn.py` is
@@ -32,7 +32,7 @@ the conversion corpus.  `docs/validation.md` describes both.
 
 ## Provenance, and how it is recoverable
 
-**738 of 952 Rust tests carry a name that appears verbatim in a Ceph
+**743 of 957 Rust tests carry a name that appears verbatim in a Ceph
 Python file.**  Translated tests keep their Python names, which is what
 makes the correspondence greppable rather than remembered:
 
@@ -44,15 +44,19 @@ makes the correspondence greppable rather than remembered:
 | `test_sts.py` | 34 | 1 | 33 |
 | `test_s3select.py` | 34 | 0 | 34 |
 | `test_sns.py` | 5 | 4 | 1 |
+| `test_bn.py` | 87 | 5 | 82 |
 | `test_s3control.py` | 1 | 0 | 1 |
 | `test_utils.py` | 1 | 0 | 1 |
-| **total** | **972** | **738** | **234** |
+| **total** | **1059** | **743** | **316** |
 
 Two translations were renamed and so are not findable by name:
 
-- `test_sns.rs`'s `test_notification_kafka_*` are the Kafka subset of
-  `test_bn.py`'s 87 tests.  AMQP, persistent topics and multisite are
-  deliberately not ported.
+- `test_sns.rs`'s `test_notification_kafka_*` are scenarios derived
+  from `test_bn.py`'s 87 tests, not translations of its Kafka tests,
+  and check less than their source:  retranslating the non-persistent
+  Kafka tests under their own names is open (the nsfs work plan, I10).
+  Its HTTP tests, in `http_tests`, are translated and keep their names.
+  AMQP, persistent topics and multisite are deliberately not ported.
 - `test_rgw/quota.rs` follows `s3_user_quota.pl`, user scope only.  The
   companion `s3_bucket_quota.pl` — bucket-scope quota, the zero and
   negative cases, enable and disable — is not ported.
@@ -102,7 +106,8 @@ then hides from its own listings.
 
 `has_kafka` is **not** a test gate — it is a build feature that pulls
 in `rdkafka`.  The Kafka tests check for a broker at run time and fail
-with a message naming `kafka-vstart.sh`.
+with a message naming `kafka-vstart.sh`.  The HTTP notification tests
+need nothing:  each starts its own endpoint.
 
 ## Remaining from `test_s3.py`, by area
 
