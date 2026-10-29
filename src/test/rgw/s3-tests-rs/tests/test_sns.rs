@@ -12,8 +12,9 @@
 //! correspondence is by behaviour rather than one-to-one:  filters,
 //! event fields, multipart, copy, multi-delete, topic attributes.
 //! Persistent topics, AMQP and multisite are deliberately not ported.
-//! The Kafka tests need a Kafka broker -- `kafka-vstart.sh`, or
-//! `[kafka] broker` in the config -- and are gated behind `has_kafka`.
+//! The Kafka tests need a Kafka broker, and are gated behind
+//! `has_kafka`.  `rgw-vstart.sh --with-kafka` starts one where they look
+//! by default;  `[kafka] broker` in the config names another.
 //!
 //! The HTTP subset of the same program, in `http_tests`, keeps its
 //! names:  the five tests whose topics are not persistent, against an
@@ -264,7 +265,6 @@ mod kafka_tests {
     fn get_kafka_broker() -> String {
         let cfg = s3_tests_rs::config::get_config();
         cfg.kafka_broker.clone()
-            .expect("kafka_broker not configured — run kafka-vstart.sh or set [kafka] broker in s3tests.conf")
     }
 
     fn make_consumer(broker: &str, topic: &str) -> StreamConsumer {

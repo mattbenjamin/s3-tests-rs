@@ -118,8 +118,11 @@ pub struct S3TestConfig {
     pub webidentity_azp: Option<String>,
     pub webidentity_realm: Option<String>,
 
-    // kafka (optional — present when kafka-vstart.sh has run)
-    pub kafka_broker: Option<String>,
+    /// The Kafka broker the notification tests push to and consume
+    /// from:  `[kafka] broker`, else the address `kafka-vstart.sh` (and
+    /// `rgw-vstart.sh --with-kafka`) starts its broker on, so running
+    /// the sidecar is all a run needs.
+    pub kafka_broker: String,
 
     // bench (optional — elbencho workload defaults)
     pub bench: BenchConfig,
@@ -137,6 +140,9 @@ pub struct BenchConfig {
     pub default_file_size: String,
     pub default_block_size: String,
 }
+
+/// Where `kafka-vstart.sh` starts its broker (`KAFKA_PORT=9092`).
+pub const KAFKA_SIDECAR_BROKER: &str = "127.0.0.1:9092";
 
 pub fn get_config() -> Arc<S3TestConfig> {
     CONFIG
@@ -324,7 +330,8 @@ fn load_config() -> Result<S3TestConfig, String> {
         webidentity_azp: ini.get("webidentity", "azp").map(|s| s.to_string()),
         webidentity_realm: ini.get("webidentity", "KC_REALM").map(|s| s.to_string()),
 
-        kafka_broker: ini.get("kafka", "broker").map(|s| s.to_string()),
+        kafka_broker: ini.get("kafka", "broker")
+            .unwrap_or_else(|| KAFKA_SIDECAR_BROKER.to_string()),
 
         bench: load_bench_config(&ini),
 

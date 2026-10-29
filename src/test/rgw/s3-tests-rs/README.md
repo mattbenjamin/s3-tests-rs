@@ -386,7 +386,7 @@ Tests that need them are `#[ignore]`'d with a reason string.
 |---|---|---|
 | **KMS (Vault or GKLM)** | SSE-KMS encryption | 9 |
 | **OIDC IdP (Keycloak)** | STS AssumeRoleWithWebIdentity | 0 (not yet translated) |
-| **Kafka broker** | S3/SNS bucket notifications to Kafka;  built with `has_kafka` | 0 |
+| **Kafka broker** | S3/SNS bucket notifications to Kafka;  built with `has_kafka`, run by `validate.rs`'s `kafka` cell | 0 |
 | **Virtual-host DNS** | Virtual-hosted bucket URLs | 0 (not yet translated) |
 | **Bucket logging rollover** | Bucket logging flush/ACL/auth tests | 3 |
 | **Bucket logging** | Bucket logging tests | 1 |

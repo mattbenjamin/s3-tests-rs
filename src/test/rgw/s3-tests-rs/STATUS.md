@@ -105,9 +105,10 @@ the pinned commit;  and three scaffolding key names NooBaa accepts and
 then hides from its own listings.
 
 `has_kafka` is **not** a test gate — it is a build feature that pulls
-in `rdkafka`.  The Kafka tests check for a broker at run time and fail
-with a message naming `kafka-vstart.sh`.  The HTTP notification tests
-need nothing:  each starts its own endpoint.
+in `rdkafka`.  The Kafka tests use the broker `[kafka] broker` names,
+or else `127.0.0.1:9092`, where `rgw-vstart.sh --with-kafka` starts
+one;  `validate.rs`'s `kafka` cell runs them.  The HTTP notification
+tests need nothing:  each starts its own endpoint.
 
 ## Remaining from `test_s3.py`, by area
 
