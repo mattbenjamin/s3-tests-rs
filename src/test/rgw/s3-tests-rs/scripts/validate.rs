@@ -70,8 +70,9 @@ enum Suite {
      * `rgwalice` taken out of `rgwfix`, putting her back after */
     DynamicGroups,
     Librgw,
-    /* `standup.rs conversion`, which starts its own gateway */
-    Conversion { impersonate: bool, access_model: &'static str },
+    /* `standup.rs conversion`, which starts its own gateway;  `adopt_by`
+     * is its setting of that name:  command, automatic or promotion */
+    Conversion { impersonate: bool, access_model: &'static str, adopt_by: &'static str },
 }
 
 struct Cell {
@@ -113,13 +114,28 @@ const CELLS: &[Cell] = &[
      * as the gateway's own identity, and impersonating under each
      * access model */
     Cell { name: "conversion", user_identity_override: false, vstart: &[],
-           suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict" }],
+           suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
+                                       adopt_by: "command" }],
            by_default: false },
     Cell { name: "conversion-posix-strict", user_identity_override: false, vstart: &[],
-           suites: &[Suite::Conversion { impersonate: true, access_model: "posix-strict" }],
+           suites: &[Suite::Conversion { impersonate: true, access_model: "posix-strict",
+                                       adopt_by: "command" }],
            by_default: false },
     Cell { name: "conversion-s3-native", user_identity_override: false, vstart: &[],
-           suites: &[Suite::Conversion { impersonate: true, access_model: "s3-native" }],
+           suites: &[Suite::Conversion { impersonate: true, access_model: "s3-native",
+                                       adopt_by: "command" }],
+           by_default: false },
+    /* the same tree adopted by the queue, not the commands:  RGW
+     * restarted in automatic mode, and the import's gateway switched to
+     * it by the `adoption` hint with the promotion checks;  both compare
+     * as `conversion` does */
+    Cell { name: "conversion-automatic", user_identity_override: false, vstart: &[],
+           suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
+                                       adopt_by: "automatic" }],
+           by_default: false },
+    Cell { name: "conversion-promotion", user_identity_override: false, vstart: &[],
+           suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
+                                       adopt_by: "promotion" }],
            by_default: false },
     /* the same six with rgw_nsfs_user_identity_override on:  an
      * account user's own row overrides its account's, as NooBaa serves
@@ -144,13 +160,16 @@ const CELLS: &[Cell] = &[
            suites: &[Suite::Profile("baseline"), Suite::Librgw],
            by_default: true },
     Cell { name: "conversion-override", user_identity_override: true, vstart: &[],
-           suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict" }],
+           suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
+                                       adopt_by: "command" }],
            by_default: false },
     Cell { name: "conversion-posix-strict-override", user_identity_override: true, vstart: &[],
-           suites: &[Suite::Conversion { impersonate: true, access_model: "posix-strict" }],
+           suites: &[Suite::Conversion { impersonate: true, access_model: "posix-strict",
+                                       adopt_by: "command" }],
            by_default: false },
     Cell { name: "conversion-s3-native-override", user_identity_override: true, vstart: &[],
-           suites: &[Suite::Conversion { impersonate: true, access_model: "s3-native" }],
+           suites: &[Suite::Conversion { impersonate: true, access_model: "s3-native",
+                                       adopt_by: "command" }],
            by_default: false },
 ];
 
@@ -353,7 +372,7 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
                     Suite::Profile(_) | Suite::Conversion { .. } | Suite::DynamicGroups
                         if o.test.is_some() => {}
                     Suite::Librgw if !o.librgw => {}
-                    Suite::Conversion { impersonate, access_model } => {
+                    Suite::Conversion { impersonate, access_model, adopt_by } => {
                         /* conversion raises CAP_DAC_OVERRIDE and CAP_CHOWN
                          * whether or not it impersonates, and an unimpersonated
                          * vstart sets no caps */
@@ -379,6 +398,7 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
                         st.env.push(("ADOPTION_NOOBAA_SRC".into(), o.noobaa_src.to_string_lossy().into()));
                         st.env.push(("ADOPTION_IMPERSONATE".into(), impersonate.to_string()));
                         st.env.push(("ADOPTION_ACCESS_MODEL".into(), access_model.to_string()));
+                        st.env.push(("ADOPTION_ADOPT_BY".into(), adopt_by.to_string()));
                         st.env.push(("ADOPTION_USER_IDENTITY_OVERRIDE".into(),
                                      c.user_identity_override.to_string()));
                         steps.push(st);
