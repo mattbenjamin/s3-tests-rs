@@ -70,6 +70,9 @@ enum Suite {
      * `rgwalice` taken out of `rgwfix`, putting her back after */
     DynamicGroups,
     Librgw,
+    /* the notification tests with `has_kafka`, against the broker the
+     * cell's `--with-kafka` started, which is stopped after them */
+    Kafka,
     /* `standup.rs conversion`, which starts its own gateway;  `adopt_by`
      * is its setting of that name:  command, automatic or promotion */
     Conversion { impersonate: bool, access_model: &'static str, adopt_by: &'static str },
@@ -129,6 +132,13 @@ const CELLS: &[Cell] = &[
      * restarted in automatic mode, and the import's gateway switched to
      * it by the `adoption` hint with the promotion checks;  both compare
      * as `conversion` does */
+    /* the notification tests against a Kafka broker:  the one cell
+     * that builds `has_kafka`.  Off by default, since the sidecar needs
+     * podman */
+    Cell { name: "kafka", user_identity_override: false,
+           vstart: &["--store", "nsfs", "--clean", "--with-kafka"],
+           suites: &[Suite::Kafka],
+           by_default: false },
     Cell { name: "conversion-automatic", user_identity_override: false, vstart: &[],
            suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
                                        adopt_by: "automatic" }],
@@ -343,6 +353,14 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
             None if !c.by_default => continue,
             _ => {}
         }
+        /* refused before anything starts, rather than failing inside the
+         * sidecar's start */
+        if c.suites.iter().any(|s| matches!(s, Suite::Kafka))
+            && !Command::new("podman").arg("--version").stdout(Stdio::null())
+                .stderr(Stdio::null()).status().is_ok_and(|st| st.success()) {
+            die(&format!("the {} cell runs a Kafka broker in a container, and \
+                          podman is not installed", c.name));
+        }
         /* a conversion's gateway is started with --with-lifecycle already */
         let variants = if o.lifecycle && !c.vstart.is_empty() { &[false, true][..] }
                        else { &[false][..] };
@@ -370,6 +388,7 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
             for suite in c.suites {
                 match suite {
                     Suite::Profile(_) | Suite::Conversion { .. } | Suite::DynamicGroups
+                    | Suite::Kafka
                         if o.test.is_some() => {}
                     Suite::Librgw if !o.librgw => {}
                     Suite::Conversion { impersonate, access_model, adopt_by } => {
@@ -430,6 +449,20 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
                             }
                             steps.push(st);
                         }
+                    }
+                    Suite::Kafka => {
+                        let mut st = step(&cell, "kafka", suite_dir, s(&["cargo", "nextest", "run",
+                            "--no-fail-fast", "--features", &format!("{FEATURES},has_kafka"),
+                            "-E", "binary(test_sns)"]));
+                        st.env.push(("S3TEST_CONF".into(), o.conf.to_string_lossy().into()));
+                        st.parallel_log = true;
+                        steps.push(st);
+                        /* run whatever the tests returned:  the broker is a
+                         * container, and the next cell's --clean only stops
+                         * one rgw-vstart.sh started */
+                        steps.push(step(&cell, "kafka-stop", b, vec![
+                            o.source_dir.join("src/script/rgw/kafka-vstart.sh")
+                                .to_string_lossy().into_owned(), "--stop".into()]));
                     }
                     Suite::Librgw => {
                         for (bin, extra) in [("ceph_test_librgw_file_write2", &["--create"][..]),

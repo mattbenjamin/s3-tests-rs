@@ -214,7 +214,9 @@ thumbprint=<obtained from x509 certificate>
 
 KC_REALM=<name of the realm>
 
-#following section is added by kafka-vstart.sh for notification testing
+#the Kafka broker for the notification tests;  without this section they
+#use 127.0.0.1:9092, where kafka-vstart.sh (rgw-vstart.sh --with-kafka)
+#starts one.  Set it only for a broker of your own.
 #[kafka]
 #broker = localhost:9092
 
