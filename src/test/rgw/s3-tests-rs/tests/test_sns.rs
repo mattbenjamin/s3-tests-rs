@@ -2269,6 +2269,39 @@ mod http_event_types {
         s3.delete_bucket().bucket(&bucket).send().await.unwrap();
     }
 
+    /* x-amz-id-2 names the gateway that made the change:  not empty, and
+     * the same for two events from one gateway */
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_host_id_http() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let (sns, s3) = (get_sns_root_client(), get_iam_root_s3client());
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let receiver = HttpReceiver::start().await;
+        let topic_arn = notify_on(&sns, &s3, &bucket, &receiver,
+            vec![Event::S3ObjectCreated]).await;
+
+        for key in ["one", "two"] {
+            s3.put_object().bucket(&bucket).key(key)
+                .body(ByteStream::from_static(b"host")).send().await.unwrap();
+        }
+        settle().await;
+        let got = records(&receiver.take());
+        assert_eq!(got.len(), 2, "{got:?}");
+        let ids: Vec<&str> = got.iter()
+            .map(|r| r["responseElements"]["x-amz-id-2"].as_str().unwrap_or_default())
+            .collect();
+        assert!(!ids[0].is_empty(), "x-amz-id-2 is empty:  {got:?}");
+        assert_eq!(ids[0], ids[1], "two events from one gateway name different hosts");
+
+        for key in ["one", "two"] {
+            s3.delete_object().bucket(&bucket).key(key).send().await.unwrap();
+        }
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
     #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
     #[tokio::test]
     async fn test_notification_object_acl_http() {
