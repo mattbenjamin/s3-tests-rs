@@ -2302,6 +2302,33 @@ mod http_event_types {
         s3.delete_bucket().bucket(&bucket).send().await.unwrap();
     }
 
+    /* an event a request caused carries the client's address:  an IP
+     * address, whichever one rgw_remote_addr_param selects */
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_source_ip_http() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let (sns, s3) = (get_sns_root_client(), get_iam_root_s3client());
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let receiver = HttpReceiver::start().await;
+        let topic_arn = notify_on(&sns, &s3, &bucket, &receiver,
+            vec![Event::S3ObjectCreated]).await;
+
+        s3.put_object().bucket(&bucket).key("ip")
+            .body(ByteStream::from_static(b"ip")).send().await.unwrap();
+        settle().await;
+        let got = records(&receiver.take());
+        assert_eq!(got.len(), 1, "{got:?}");
+        let ip = got[0]["requestParameters"]["sourceIPAddress"].as_str().unwrap_or_default();
+        assert!(ip.parse::<std::net::IpAddr>().is_ok(),
+                "sourceIPAddress {ip:?} is not an IP address");
+
+        s3.delete_object().bucket(&bucket).key("ip").send().await.unwrap();
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
     #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
     #[tokio::test]
     async fn test_notification_object_acl_http() {
