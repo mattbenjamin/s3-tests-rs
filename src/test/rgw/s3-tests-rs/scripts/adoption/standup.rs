@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 serde_json = "1"
 aws-smithy-xml = "=0.60.15"
+md-5 = "0.10"
+base64 = "0.22"
 ---
 //! Stand up NooBaa's NSFS gateway over a data root, so that the
 //! conversion corpus can be run against *their* implementation and the
@@ -63,6 +65,8 @@ struct Env {
     port: u16,
     /// the port RGW serves on after `adopt` -- `rgw-vstart.sh`'s default
     rgw_port: u16,
+    /// where `notify` listens for both gateways' notifications
+    notify_port: u16,
     /// NooBaa's IAM port.  HTTPS only -- their IAM listener has no
     /// HTTP form -- with the self-signed certificate they generate
     /// when the config root holds none
@@ -223,6 +227,7 @@ impl Env {
              * problem worth not having. */
             port: get("port", "6001").parse().unwrap_or(6001),
             rgw_port: get("rgw_port", "8000").parse().unwrap_or(8000),
+            notify_port: get("notify_port", "9101").parse().unwrap_or(9101),
             iam_port: get("iam_port", "7005").parse().unwrap_or(7005),
             sts_port: get("sts_port", "7443").parse().unwrap_or(7443),
             account: get("account", "adoption"),
@@ -361,6 +366,7 @@ const STEPS: &[(&str, &str)] = &[
     ("groups", "under impersonation, write through rgwfix as list-less accounts:  NooBaa before `stop`, RGW after `role-rgw`"),
     ("copy", "under impersonation, a user whose account moved after the user was made:  NooBaa before `stop` makes and records it, RGW after `role-rgw` serves it per rgw_nsfs_user_identity_override"),
     ("nsswitch", "write as the nsswitch-resolved account, and check the file is the name's uid's:  NooBaa before `stop`, RGW after `role-rgw`"),
+    ("notify", "the same writes on a bucket with a notification, its events captured:  NooBaa before `stop`, through a connection and `noobaa-cli notification`;  RGW after `adopt`, through its own topic"),
     ("stop",     "stop the endpoint, leaving the tree"),
     ("damage",   "damage one bucket record, so adoption meets a record it cannot carry"),
     ("import",   "RGW over the same tree;  import the identities, buckets left in NooBaa's format"),
@@ -404,6 +410,7 @@ fn main() {
         "nsswitch" => nsswitch_step(&env),
         "groups" => groups_step(&env),
         "copy" => copy_step(&env),
+        "notify" => notify_step(&env),
         "capture" => capture(&env, args.get(1).map(String::as_str).unwrap_or("noobaa")),
         "stop" => stop(&env),
         "damage" => damage(&env),
@@ -463,6 +470,7 @@ fn list() {
         ("iam_port", "the NooBaa IAM port, HTTPS"),
         ("sts_port", "the NooBaa STS port, HTTPS;  default 7443"),
         ("rgw_port", "the port RGW serves on after `adopt`"),
+        ("notify_port", "where `notify` listens for notifications;  default 9101"),
         ("account", "the account `config` creates;  default adoption"),
         ("role", "the role `config` gives the account;  default adoption-role"),
         ("iam_user", "the IAM user `iam-user` creates;  default adoption-iam-user"),
@@ -1068,11 +1076,16 @@ fn config(env: &Env) -> Result<(), String> {
      * NooBaa unprivileged cannot install groups, so the unimpersonated
      * tree is written without them (the `groups` step). */
     let cfg = env.config_root().join("config.json");
-    let text = if env.impersonate {
-        "{\n    \"ALLOW_HTTP\": true,\n    \"NSFS_ENABLE_DYNAMIC_SUPPLEMENTAL_GROUPS\": true\n}\n"
-    } else {
-        "{\n    \"ALLOW_HTTP\": true\n}\n"
-    };
+    /* NOTIFICATION_LOG_DIR is where NooBaa stages the events `notify`
+     * delivers;  without it the endpoint records none.  In config.json
+     * rather than the environment, which sudo would reset */
+    let notify_log = notify_log_dir(env);
+    std::fs::create_dir_all(&notify_log)
+        .map_err(|e| format!("cannot create {}: {e}", notify_log.display()))?;
+    let text = format!(
+        "{{\n    \"ALLOW_HTTP\": true,\n{}    \"NOTIFICATION_LOG_DIR\": {}\n}}\n",
+        if env.impersonate { "    \"NSFS_ENABLE_DYNAMIC_SUPPLEMENTAL_GROUPS\": true,\n" } else { "" },
+        serde_json::Value::from(notify_log.display().to_string()));
     std::fs::write(&cfg, text)
         .map_err(|e| format!("cannot write {}: {e}", cfg.display()))?;
     println!("         wrote {} (ALLOW_HTTP{})", cfg.display(),
@@ -2652,7 +2665,7 @@ fn conversion(env: &Env) -> Result<(), String> {
      * the NooBaa build rather than at `import` and `adopt`, by when a
      * sudo ticket taken beforehand has expired. */
     preflight_rgw(ceph_build)?;
-    let steps: [(&str, &dyn Fn(&Env) -> Result<(), String>); 25] = [
+    let steps: [(&str, &dyn Fn(&Env) -> Result<(), String>); 27] = [
         ("pin", &pin),
         ("worktree", &worktree),
         ("patch", &patch),
@@ -2667,12 +2680,14 @@ fn conversion(env: &Env) -> Result<(), String> {
         ("nsswitch noobaa", &nsswitch_step),
         ("groups noobaa", &groups_step),
         ("copy noobaa", &copy_step),
+        ("notify noobaa", &notify_step),
         ("stop", &stop),
         ("damage", &damage),
         ("import", &|e| adopt(e, "import")),
         ("capture rgw-unadopted", &|e| capture(e, "rgw-unadopted")),
         ("adopt", &|e| adopt(e, "adopt")),
         ("capture rgw-converted", &|e| capture(e, "rgw-converted")),
+        ("notify rgw", &notify_step),
         ("compare", &compare),
         ("role-rgw", &role_rgw),
         ("nsswitch rgw", &nsswitch_step),
@@ -2937,7 +2952,8 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
         println!("{tag} RGW already serves this tree;  adopting in place");
     } else {
     println!("         rgw-vstart.sh --store nsfs --data-root {} \
-              --noobaa-config-root {} --adoption-mode command --with-lifecycle {} {}",
+              --noobaa-config-root {} --adoption-mode command --with-lifecycle \
+              -o rgw_notification_bucket_arn_region=false {} {}",
              env.data.display(), env.config_root().display(),
              rgw_etag_opts(env).join(" "), rgw_identity_opts(env).join(" "));
     let st = Command::new("bash")
@@ -2955,6 +2971,10 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
             "--adoption-mode",
             "command",
             "--with-lifecycle",
+            /* an adopted NooBaa deployment's notifications name a bucket
+             * as NooBaa and AWS do, arn:aws:s3:::<bucket> */
+            "-o",
+            "rgw_notification_bucket_arn_region=false",
         ])
         .args(rgw_etag_opts(env))
         .args(rgw_identity_opts(env))
@@ -3334,6 +3354,359 @@ fn adopt_by_profile(env: &Env, admin: &str, name: &str) -> Result<(), String> {
             "bucket {name} went from {had:?} to {now:?}, not to shared:\n{body}"));
     }
     println!("adopt    bucket {name}:  profile shared by the profile endpoint");
+    Ok(())
+}
+
+/// Where NooBaa stages notification events, named in its config.json.
+fn notify_log_dir(env: &Env) -> PathBuf {
+    env.work.join("notify-log")
+}
+
+/// The `notify` step's bucket.  Not a corpus bucket.
+const NOTIFY_BUCKET: &str = "notify";
+/// The connection NooBaa's notification names, and RGW's topic.
+const NOTIFY_TOPIC: &str = "notify";
+
+/// What one gateway sent:  every POST's body, in the order received.
+#[derive(Clone, Default)]
+struct NotifyReceived(std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>);
+
+/// A receiver for the `notify` step, on `notify_port`:  HTTP/1.1, a
+/// body by Content-Length or chunked -- NooBaa's sender writes no
+/// length -- and `Expect: 100-continue`.  Each POST is answered 200 and
+/// kept.  One per process, started by the first `notify` and kept
+/// until the process ends:  under `conversion` both sides run in one
+/// process, and each starts from an empty store.
+fn notify_receiver(env: &Env) -> Result<NotifyReceived, String> {
+    static RECEIVER: std::sync::OnceLock<NotifyReceived> = std::sync::OnceLock::new();
+    if let Some(got) = RECEIVER.get() {
+        got.0.lock().unwrap().clear();
+        return Ok(got.clone());
+    }
+    let got = start_notify_receiver(env)?;
+    Ok(RECEIVER.get_or_init(|| got).clone())
+}
+
+fn start_notify_receiver(env: &Env) -> Result<NotifyReceived, String> {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", env.notify_port))
+        .map_err(|e| format!("cannot listen on 127.0.0.1:{}: {e}", env.notify_port))?;
+    let got = NotifyReceived::default();
+    let store = got.clone();
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let mut wr = match conn.try_clone() { Ok(w) => w, Err(_) => return };
+                let mut rd = BufReader::new(conn);
+                loop {
+                    let mut line = String::new();
+                    if rd.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let mut len: Option<usize> = None;
+                    let (mut chunked, mut cont) = (false, false);
+                    loop {
+                        let mut h = String::new();
+                        if rd.read_line(&mut h).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let h = h.trim_end();
+                        if h.is_empty() {
+                            break;
+                        }
+                        let Some((k, v)) = h.split_once(':') else { continue };
+                        match k.trim().to_ascii_lowercase().as_str() {
+                            "content-length" => len = v.trim().parse().ok(),
+                            "transfer-encoding" => chunked = v.to_ascii_lowercase().contains("chunked"),
+                            "expect" => cont = v.trim().eq_ignore_ascii_case("100-continue"),
+                            _ => {}
+                        }
+                    }
+                    if cont && wr.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").is_err() {
+                        return;
+                    }
+                    let mut body = Vec::new();
+                    if chunked {
+                        loop {
+                            let mut size = String::new();
+                            if rd.read_line(&mut size).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            let n = usize::from_str_radix(size.trim().split(';').next().unwrap_or("0"), 16)
+                                .unwrap_or(0);
+                            let mut chunk = vec![0u8; n + 2];
+                            if rd.read_exact(&mut chunk).is_err() {
+                                return;
+                            }
+                            if n == 0 {
+                                break;
+                            }
+                            body.extend_from_slice(&chunk[..n]);
+                        }
+                    } else {
+                        let mut b = vec![0u8; len.unwrap_or(0)];
+                        if rd.read_exact(&mut b).is_err() {
+                            return;
+                        }
+                        body = b;
+                    }
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
+                        store.0.lock().unwrap().push(v);
+                    }
+                    if wr.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    Ok(got)
+}
+
+/// One signed S3 request as `who`, with headers and a body.
+fn s3_call(who: &str, method: &str, url: &str, headers: &[(&str, &str)], body: Option<&str>)
+           -> Result<(u16, String, String), String> {
+    let hdr = std::env::temp_dir().join(format!("standup-notify-{}.hdr", std::process::id()));
+    let mut args: Vec<String> = vec!["-D".into(), hdr.display().to_string(),
+        "-X".into(), method.into(), "--aws-sigv4".into(), "aws:amz:us-east-1:s3".into(),
+        "--user".into(), who.into()];
+    for (k, v) in headers {
+        args.push("-H".into());
+        args.push(format!("{k}: {v}"));
+    }
+    if let Some(b) = body {
+        args.push("--data-binary".into());
+        args.push(b.into());
+    } else if method == "PUT" || method == "POST" {
+        /* curl sends no length without a body, and NooBaa requires one */
+        args.push("-H".into());
+        args.push("Content-Length: 0".into());
+    }
+    args.push(url.into());
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (status, text) = curl(&a)?;
+    let headers = std::fs::read_to_string(&hdr).unwrap_or_default();
+    let _ = std::fs::remove_file(&hdr);
+    Ok((status, text, headers))
+}
+
+fn header<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+    headers.lines().rev().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
+    })
+}
+
+/// The same writes on either gateway:  a plain object, one with user
+/// metadata, a copy of it, a one-part multipart upload, tags on the
+/// first, a delete, and a multi-object delete of the copy and the
+/// upload.
+fn notify_writes(who: &str, base: &str) -> Result<(), String> {
+    let b = format!("{base}/{NOTIFY_BUCKET}");
+    let ok = |what: &str, r: (u16, String, String)| -> Result<(u16, String, String), String> {
+        if (200..300).contains(&r.0) { Ok(r) } else {
+            Err(format!("notify:  {what} returned {}:\n{}", r.0, r.1))
+        }
+    };
+    ok("PUT plain", s3_call(who, "PUT", &format!("{b}/plain"), &[], Some("notify plain"))?)?;
+    ok("PUT meta", s3_call(who, "PUT", &format!("{b}/meta"),
+        &[("x-amz-meta-color", "blue")], Some("notify meta"))?)?;
+    ok("copy", s3_call(who, "PUT", &format!("{b}/copy"),
+        &[("x-amz-copy-source", &format!("/{NOTIFY_BUCKET}/meta"))], None)?)?;
+    let (_, init, _) = ok("initiate mpu", s3_call(who, "POST", &format!("{b}/mpu?uploads"), &[], None)?)?;
+    let upload = xml_tag(&init, "UploadId").ok_or("notify:  no UploadId")?;
+    let (_, _, h) = ok("upload part", s3_call(who, "PUT",
+        &format!("{b}/mpu?partNumber=1&uploadId={upload}"), &[], Some("notify mpu part"))?)?;
+    let etag = header(&h, "etag").ok_or("notify:  the part has no ETag")?.to_string();
+    ok("complete mpu", s3_call(who, "POST", &format!("{b}/mpu?uploadId={upload}"), &[],
+        Some(&format!("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber>\
+                       <ETag>{etag}</ETag></Part></CompleteMultipartUpload>")))?)?;
+    ok("tagging", s3_call(who, "PUT", &format!("{b}/plain?tagging"), &[],
+        Some("<Tagging><TagSet><Tag><Key>k</Key><Value>v</Value></Tag></TagSet></Tagging>"))?)?;
+    ok("DELETE meta", s3_call(who, "DELETE", &format!("{b}/meta"), &[], None)?)?;
+    let del = "<Delete><Object><Key>copy</Key></Object><Object><Key>mpu</Key></Object></Delete>";
+    use base64::Engine;
+    use md5::Digest;
+    let md5 = base64::engine::general_purpose::STANDARD.encode(md5::Md5::digest(del.as_bytes()));
+    ok("multi-delete", s3_call(who, "POST", &format!("{b}?delete"),
+        &[("Content-MD5", &md5)], Some(del))?)?;
+    Ok(())
+}
+
+/// The bucket's notification on `topic`, for creates, removes and tags.
+fn notify_configure(who: &str, base: &str, topic: &str) -> Result<(), String> {
+    let conf = format!("<NotificationConfiguration><TopicConfiguration><Id>{NOTIFY_TOPIC}</Id>\
+        <Topic>{topic}</Topic><Event>s3:ObjectCreated:*</Event>\
+        <Event>s3:ObjectRemoved:*</Event><Event>s3:ObjectTagging:*</Event>\
+        </TopicConfiguration></NotificationConfiguration>");
+    let (status, body, _) = s3_call(who, "PUT", &format!("{base}/{NOTIFY_BUCKET}?notification"),
+                                    &[], Some(&conf))?;
+    if !(200..300).contains(&status) {
+        return Err(format!("notify:  configuring the notification returned {status}:\n{body}"));
+    }
+    Ok(())
+}
+
+/// Write what arrived as a manifest, one subject per record:  `event
+/// <key> <kind>`, the kind the event name's first part (ObjectCreated,
+/// ObjectRemoved, ObjectTagging), a second of one kind on one key
+/// numbered.  Every leaf of the record is a fact.  The values that
+/// differ on every run -- times, sequencers, request ids -- are written
+/// as present or empty, so the comparison sees their presence and not
+/// their value.
+fn notify_manifest(records: &[serde_json::Value]) -> String {
+    const VARIES: [&str; 5] = ["eventTime", "s3.object.sequencer", "eventId",
+                               "responseElements.x-amz-request-id",
+                               "responseElements.x-amz-id-2"];
+    fn enc(s: &str) -> String {
+        let mut out = String::new();
+        for b in s.bytes() {
+            match b {
+                b'%' => out.push_str("%25"),
+                b'\t' => out.push_str("%09"),
+                b'\n' => out.push_str("%0A"),
+                b'\r' => out.push_str("%0D"),
+                0x20..=0x7e => out.push(b as char),
+                _ => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
+    }
+    fn leaves(v: &serde_json::Value, path: String, out: &mut Vec<(String, String)>) {
+        match v {
+            serde_json::Value::Object(m) => for (k, x) in m {
+                leaves(x, if path.is_empty() { k.clone() } else { format!("{path}.{k}") }, out);
+            },
+            serde_json::Value::Array(a) => for (i, x) in a.iter().enumerate() {
+                leaves(x, format!("{path}[{i}]"), out);
+            },
+            serde_json::Value::String(s) => out.push((path, s.clone())),
+            other => out.push((path, other.to_string())),
+        }
+    }
+    let mut lines = std::collections::BTreeSet::new();
+    let mut seen: std::collections::BTreeMap<String, usize> = Default::default();
+    for r in records {
+        let key = r["s3"]["object"]["key"].as_str().unwrap_or_default();
+        let name = r["eventName"].as_str().unwrap_or_default();
+        let kind = name.trim_start_matches("s3:").split(':').next().unwrap_or_default();
+        let base = format!("{key} {kind}");
+        let n = seen.entry(base.clone()).or_default();
+        *n += 1;
+        let subject = if *n == 1 { base } else { format!("{base} {n}") };
+        let mut facts = Vec::new();
+        leaves(r, String::new(), &mut facts);
+        for (field, value) in facts {
+            let value = if VARIES.contains(&field.as_str()) {
+                if value.is_empty() { String::new() } else { "<present>".into() }
+            } else { value };
+            lines.insert(format!("event\t{}\t{}\t{}", enc(&subject), field, enc(&value)));
+        }
+    }
+    lines.into_iter().map(|l| l + "\n").collect()
+}
+
+/// Deliver what NooBaa staged, as `noobaa-cli notification` does
+/// (`notification_management()`, manage_nsfs.js:920 at 08d063f86).  Not
+/// through the CLI, which cannot be pointed at this store:  the
+/// `notification` type has no action, so `validate_no_extra_options()`
+/// looks its options up as `notification_options[undefined]` and throws
+/// on any option, `--config_root` included
+/// (manage_nsfs_validations.js:182).  The CLI delivers only for the
+/// default config directory.
+fn noobaa_deliver_notifications(env: &Env) -> Result<(), String> {
+    let script = format!(
+        "const config = require('./config');\
+         config.NOTIFICATION_LOG_DIR = {log};\
+         const {{ ConfigFS }} = require('./src/sdk/config_fs');\
+         const nu = require('./src/util/notifications_util');\
+         const config_fs = new ConfigFS({root});\
+         new nu.Notificator({{ fs_context: config_fs.fs_context,\
+           connect_files_dir: config_fs.connections_dir_path,\
+           nc_config_fs: config_fs }}).process_notification_files()\
+           .then(() => process.exit(0), e => {{ console.error(e); process.exit(1); }});",
+        log = serde_json::Value::from(notify_log_dir(env).display().to_string()),
+        root = serde_json::Value::from(env.config_root().display().to_string()));
+    let out = privileged(env, &node_path(env))
+        .args(["-e", &script])
+        .current_dir(env.worktree())
+        .output()
+        .map_err(|e| format!("cannot run {}: {e}", env.node()))?;
+    if !out.status.success() {
+        return Err(format!("delivering NooBaa's staged notifications failed:\n{}",
+                           String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(())
+}
+
+/// `notify`:  the same writes on a bucket with a notification, on
+/// whichever gateway is up, and the events that gateway sends,
+/// captured under `capture/notify-noobaa` or `capture/notify-rgw` for
+/// `compare`.  NooBaa sends through a connection, after the writes, when
+/// `noobaa-cli notification` delivers what it staged;  RGW sends
+/// through its own topic as each write completes.  Until the import
+/// carries NooBaa's connections across (work plan I10), the RGW side
+/// makes its topic itself.
+fn notify_step(env: &Env) -> Result<(), String> {
+    let noobaa = running(env).is_some();
+    let side = if noobaa { "noobaa" } else { "rgw" };
+    let who = format!("{}:{}", env.access_key, env.secret_key);
+    let endpoint = format!("http://127.0.0.1:{}", env.notify_port);
+    let got = notify_receiver(env)?;
+    let topic = if noobaa {
+        let base = format!("http://127.0.0.1:{}", env.port);
+        let opts = serde_json::json!({"host": "127.0.0.1", "port": env.notify_port,
+                                      "path": "/"}).to_string();
+        let _ = nsfs_cli(env, &["connection", "delete", "--name", NOTIFY_TOPIC]);
+        nsfs_cli(env, &["connection", "add", "--name", NOTIFY_TOPIC,
+                        "--notification_protocol", "http",
+                        "--request_options_object", &opts])?;
+        println!("notify   connection {NOTIFY_TOPIC:?} to {endpoint}");
+        let (status, body, _) = s3_call(&who, "PUT", &format!("{base}/{NOTIFY_BUCKET}"), &[], None)?;
+        /* a rerun finds it, and NooBaa says so either way */
+        if !(200..300).contains(&status) && !body.contains("BucketAlreadyOwnedByYou")
+            && !body.contains("BucketAlreadyExists") {
+            return Err(format!("notify:  creating {NOTIFY_BUCKET} returned {status}:\n{body}"));
+        }
+        NOTIFY_TOPIC.to_string()
+    } else {
+        let base = format!("http://127.0.0.1:{}", env.rgw_port);
+        let form = format!("Action=CreateTopic&Name={NOTIFY_TOPIC}\
+            &Attributes.entry.1.key=push-endpoint&Attributes.entry.1.value={}",
+            endpoint.replace(':', "%3A").replace('/', "%2F"));
+        let (status, body, _) = s3_call(&who, "POST", &format!("{base}/"),
+            &[("Content-Type", "application/x-www-form-urlencoded")], Some(&form))?;
+        let arn = xml_tag(&body, "TopicArn").filter(|_| status == 200)
+            .ok_or_else(|| format!("notify:  CreateTopic returned {status}:\n{body}"))?;
+        println!("notify   topic {arn} to {endpoint}");
+        arn
+    };
+    let base = format!("http://127.0.0.1:{}", if noobaa { env.port } else { env.rgw_port });
+    notify_configure(&who, &base, &topic)?;
+    notify_writes(&who, &base)?;
+    if noobaa {
+        noobaa_deliver_notifications(env)?;
+    }
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let posts = got.0.lock().unwrap().clone();
+    let records: Vec<serde_json::Value> = posts.iter()
+        .flat_map(|p| p["Records"].as_array().cloned().unwrap_or_default())
+        /* NooBaa's TestEvent, sent when the notification is configured,
+         * is {Bucket, Event, ...} with no eventName */
+        .filter(|r| r.get("eventName").is_some())
+        .collect();
+    if records.is_empty() {
+        return Err(format!("notify:  {side} sent no event for the writes ({} POSTs)", posts.len()));
+    }
+    let dir = env.capture_dir(&format!("notify-{side}"));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    std::fs::write(dir.join("notify.manifest"), notify_manifest(&records))
+        .map_err(|e| format!("cannot write {}: {e}", dir.display()))?;
+    std::fs::write(dir.join("notify.json"), serde_json::Value::from(records.clone()).to_string())
+        .map_err(|e| format!("cannot write {}: {e}", dir.display()))?;
+    println!("notify   {side}:  {} events captured in {}", records.len(), dir.display());
     Ok(())
 }
 

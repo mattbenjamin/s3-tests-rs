@@ -173,6 +173,36 @@ the `adoption` hint reports that a gateway already serves this tree,
 and would re-import the identities under new ids, so the two captures
 would see different owners.
 
+**`notify`** captures what each gateway sends a notification endpoint,
+for the same writes, so a consumer of NooBaa's notifications can be
+held to RGW's.  It runs twice:  `notify noobaa` before `stop`, and
+`notify rgw` after `capture rgw-converted`.  Each listens on
+`notify_port` (9101), configures a notification on the `notify` bucket
+for creates, removes and tags, and makes the same writes:  a PUT, a PUT
+with user metadata, a copy, a one-part multipart upload, tags, a
+DELETE, and a multi-object delete of two keys.
+
+- **NooBaa** sends through a connection, `noobaa-cli connection add`,
+  HTTP to the listener;  configuring the notification sends it a
+  TestEvent, which is not kept.  `config` names `NOTIFICATION_LOG_DIR`
+  in `config.json`, where the endpoint stages each event, and `notify`
+  delivers them after the writes.  Not with `noobaa-cli notification`,
+  which at the pin cannot be pointed at this store:  the `notification`
+  type has no action, so `validate_no_extra_options()` reads
+  `notification_options[undefined]` and throws on any option,
+  `--config_root` included (`manage_nsfs_validations.js:182`).
+  `notify` runs what that command runs (`notification_management()`)
+  against this store instead.
+- **RGW** sends through an SNS topic `notify` makes itself, pointing at
+  the listener, as each write completes.  Once the import carries
+  NooBaa's connections across (the nsfs work plan, I10), it will use
+  the imported topic instead.
+
+The events are written as `capture/notify-<side>/notify.manifest`, one
+subject per event, `event <key> <kind>`, a fact per field of the
+record;  times, sequencers and request ids are written as present or
+empty.  `compare` holds them as the pair `noobaa:rgw-notify`.
+
 **`ADOPTION_ADOPT_BY`** says what adopts the tree at `adopt`.
 `command`, the default, is the sequence above.  The other two let
 `automatic`'s queue adopt it instead (`NSFS_ADOPTION.md` §9), and both

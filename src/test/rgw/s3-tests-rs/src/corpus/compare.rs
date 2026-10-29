@@ -145,6 +145,7 @@ pub fn glob(pattern: &str, s: &str) -> bool {
 pub fn normalizer(name: &str) -> Option<fn(&str) -> String> {
     match name {
         "synthetic-identity" => Some(synthetic_identity),
+        "ip-address" => Some(ip_address),
         _ => None,
     }
 }
@@ -165,6 +166,19 @@ pub fn synthetic_identity(v: &str) -> String {
         }
     }
     v.to_string()
+}
+
+/// An IP address, an IPv4 one written as IPv6 (`::ffff:a.b.c.d`) taken
+/// back to its IPv4 form.  A dual-stack socket reports an IPv4 client
+/// that way, so the two gateways name one client two ways.  Anything
+/// else is returned unchanged.
+pub fn ip_address(v: &str) -> String {
+    match v.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(a)) => a.to_ipv4_mapped()
+            .map(|v4| v4.to_string()).unwrap_or_else(|| a.to_string()),
+        Ok(a) => a.to_string(),
+        Err(_) => v.to_string(),
+    }
 }
 
 /* ---------------------------------------------------------------- */
@@ -429,6 +443,16 @@ mod tests {
         assert!(parse_rows("p\t\tmanifest\t\tetag\trecognize:nope\twhy\n").is_err());
         assert!(parse_rows("p\t\tmanifest\t\tetag\tequal\t \n").is_err(), "no reason");
         assert!(parse_rows("p\t\tdisk\t\tetag\tequal\twhy\n").is_err(), "artifact");
+    }
+
+    #[test]
+    fn ip_address_takes_a_mapped_ipv4_address_back() {
+        assert_eq!(ip_address("::ffff:127.0.0.1"), "127.0.0.1");
+        assert_eq!(ip_address("127.0.0.1"), "127.0.0.1");
+        /* a real IPv6 address, and what is not an address, are kept */
+        assert_eq!(ip_address("2001:db8::1"), "2001:db8::1");
+        assert_eq!(ip_address(""), "");
+        assert_ne!(ip_address("::ffff:10.0.0.1"), ip_address("127.0.0.1"));
     }
 
     #[test]
