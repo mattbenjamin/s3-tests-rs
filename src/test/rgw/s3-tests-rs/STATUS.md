@@ -14,10 +14,10 @@ Four kinds of work, six modules.
 | `test_s3` | 751 | `test_s3.py`, `test_headers.py`, `rgw_multi/tests.py` |
 | `test_iam` | 75 | `test_iam.py`, `test_sts.py`, plus new account coverage |
 | `test_rgw` | 81 | original, except `quota.rs` from `s3_user_quota.pl` |
-| `test_sns` | 31 | `test_sns.py`;  the HTTP subset of `test_bn.py`;  Kafka scenarios derived from it |
+| `test_sns` | 33 | `test_sns.py`;  the HTTP subset of `test_bn.py`;  Kafka scenarios derived from it;  two original event-type tests |
 | `test_bench` | 7 | original — `elbencho` workload automation |
 | `test_corpus` | 12 | original — the conversion corpus |
-| **total** | **957** | |
+| **total** | **959** | |
 
 The Python sources are the s3-tests suite vendored in the Ceph tree at
 `src/test/rgw/s3-tests/`;  `test_bn.py` is
@@ -32,7 +32,7 @@ the conversion corpus.  `docs/validation.md` describes both.
 
 ## Provenance, and how it is recoverable
 
-**743 of 957 Rust tests carry a name that appears verbatim in a Ceph
+**743 of 959 Rust tests carry a name that appears verbatim in a Ceph
 Python file.**  Translated tests keep their Python names, which is what
 makes the correspondence greppable rather than remembered:
 
