@@ -2154,3 +2154,134 @@ mod http_tests {
         s3.delete_bucket().bucket(&bucket).send().await.unwrap();
     }
 }
+
+/* Event types test_bn.py does not exercise, against the same in-process
+ * endpoint:  the suite's own tests, not translations.  Each checks the
+ * event and the case AWS defines as sending none. */
+mod http_event_types {
+    use std::time::Duration;
+
+    use aws_sdk_s3::primitives::ByteStream;
+    use aws_sdk_s3::types::{Event, NotificationConfiguration, ObjectCannedAcl,
+                            ObjectOwnership, OwnershipControls, OwnershipControlsRule,
+                            Tag, Tagging, TopicConfiguration, BucketCannedAcl};
+
+    use s3_tests_rs::client::{get_iam_root_s3client, get_sns_root_client};
+    use s3_tests_rs::fixtures::get_new_bucket_name;
+    use s3_tests_rs::notify_receiver::{HttpReceiver, Received};
+
+    async fn notify_on(sns: &aws_sdk_sns::Client, s3: &aws_sdk_s3::Client, bucket: &str,
+                       receiver: &HttpReceiver, events: Vec<Event>) -> String {
+        let topic_arn = sns.create_topic().name(format!("{bucket}_topic"))
+            .attributes("push-endpoint", receiver.endpoint())
+            .send().await.unwrap().topic_arn().unwrap().to_string();
+        s3.put_bucket_notification_configuration().bucket(bucket)
+            .notification_configuration(NotificationConfiguration::builder()
+                .topic_configurations(TopicConfiguration::builder()
+                    .id(format!("{bucket}_notif")).topic_arn(&topic_arn)
+                    .set_events(Some(events)).build().unwrap())
+                .build())
+            .send().await.unwrap();
+        topic_arn
+    }
+
+    fn records(received: &[Received]) -> Vec<serde_json::Value> {
+        received.iter()
+            .flat_map(|p| p.body["Records"].as_array().cloned().unwrap_or_default())
+            .collect()
+    }
+
+    async fn settle() {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_object_tagging_http() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let (sns, s3) = (get_sns_root_client(), get_iam_root_s3client());
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let receiver = HttpReceiver::start().await;
+        let topic_arn = notify_on(&sns, &s3, &bucket, &receiver,
+            vec![Event::from("s3:ObjectTagging:*")]).await;
+
+        let put = s3.put_object().bucket(&bucket).key("tagged")
+            .body(ByteStream::from_static(b"tagged body")).send().await.unwrap();
+        let etag = put.e_tag().unwrap().trim_matches('"').to_string();
+        settle().await;
+        assert!(receiver.take().is_empty(), "a creation sent an event to a tagging-only configuration");
+
+        s3.put_object_tagging().bucket(&bucket).key("tagged")
+            .tagging(Tagging::builder().tag_set(Tag::builder().key("k").value("v").build().unwrap())
+                     .build().unwrap())
+            .send().await.unwrap();
+        settle().await;
+        let put_events = records(&receiver.take());
+        assert_eq!(put_events.len(), 1, "PutObjectTagging:  {put_events:?}");
+        let r = &put_events[0];
+        assert_eq!(r["eventName"], "ObjectTagging:Put");
+        assert_eq!(r["s3"]["object"]["key"], "tagged");
+        assert_eq!(r["s3"]["object"]["size"], 11);
+        assert_eq!(r["s3"]["object"]["eTag"], etag.as_str());
+
+        s3.delete_object_tagging().bucket(&bucket).key("tagged").send().await.unwrap();
+        settle().await;
+        let del_events = records(&receiver.take());
+        assert_eq!(del_events.len(), 1, "DeleteObjectTagging:  {del_events:?}");
+        assert_eq!(del_events[0]["eventName"], "ObjectTagging:Delete");
+        assert_eq!(del_events[0]["s3"]["object"]["key"], "tagged");
+
+        s3.delete_object().bucket(&bucket).key("tagged").send().await.unwrap();
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_object_acl_http() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let (sns, s3) = (get_sns_root_client(), get_iam_root_s3client());
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        s3.put_bucket_ownership_controls().bucket(&bucket)
+            .ownership_controls(OwnershipControls::builder()
+                .rules(OwnershipControlsRule::builder()
+                    .object_ownership(ObjectOwnership::ObjectWriter).build().unwrap())
+                .build().unwrap())
+            .send().await.unwrap();
+        let receiver = HttpReceiver::start().await;
+        let topic_arn = notify_on(&sns, &s3, &bucket, &receiver,
+            vec![Event::from("s3:ObjectAcl:Put")]).await;
+
+        s3.put_object().bucket(&bucket).key("acl")
+            .body(ByteStream::from_static(b"acl body")).send().await.unwrap();
+        settle().await;
+        assert!(receiver.take().is_empty(), "a creation sent an event to an ACL-only configuration");
+
+        s3.put_object_acl().bucket(&bucket).key("acl").acl(ObjectCannedAcl::PublicRead)
+            .send().await.unwrap();
+        settle().await;
+        let changed = records(&receiver.take());
+        assert_eq!(changed.len(), 1, "an ACL change:  {changed:?}");
+        assert_eq!(changed[0]["eventName"], "ObjectAcl:Put");
+        assert_eq!(changed[0]["s3"]["object"]["key"], "acl");
+
+        /* "An event is not generated when a request results in no change
+         * to an object's ACL" */
+        s3.put_object_acl().bucket(&bucket).key("acl").acl(ObjectCannedAcl::PublicRead)
+            .send().await.unwrap();
+        settle().await;
+        assert!(receiver.take().is_empty(), "the same ACL again sent an event");
+
+        /* the event is an object's;  a bucket's ACL sends none */
+        s3.put_bucket_acl().bucket(&bucket).acl(BucketCannedAcl::PublicRead)
+            .send().await.unwrap();
+        settle().await;
+        assert!(receiver.take().is_empty(), "a bucket ACL sent an event");
+
+        s3.delete_object().bucket(&bucket).key("acl").send().await.unwrap();
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+}
