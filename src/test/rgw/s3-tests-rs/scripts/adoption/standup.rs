@@ -116,6 +116,12 @@ struct Env {
     /// `rgw_nsfs_user_identity_override` for the gateway, checked
     /// against what it reports once it is up
     user_identity_override: bool,
+    /// what adopts the tree at `adopt`:  `command`, the commands, one
+    /// bucket at a time;  `automatic`, RGW restarted in automatic mode,
+    /// adopting from its startup;  `promotion`, the import's gateway
+    /// switched to automatic by the `adoption` hint, with the promotion
+    /// checks (`promotion()`)
+    adopt_by: String,
 }
 
 /// `--config FILE`, when it was given;  set once, by main().
@@ -256,6 +262,7 @@ impl Env {
             user_identity_override: matches!(
                 get("user_identity_override", "false").to_ascii_lowercase().as_str(),
                 "1" | "on" | "true" | "yes"),
+            adopt_by: get("adopt_by", "command"),
         })
     }
 
@@ -464,6 +471,7 @@ fn list() {
         ("suite", "the s3-tests-rs checkout;  defaults to two levels up from this driver"),
         ("tier", "which corpus tier `capture` runs"),
         ("md5", "true makes NooBaa compute MD5 ETags;  fixed per tree"),
+        ("adopt_by", "what adopts at `adopt`:  command (default), automatic or promotion"),
     ];
     for (k, note) in shown {
         match s.get(k) {
@@ -2853,6 +2861,13 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
             conf_file().display()
         ));
     };
+    if !matches!(env.adopt_by.as_str(), "command" | "automatic" | "promotion") {
+        return Err(format!("adopt_by is {:?};  it takes command, automatic or \
+                            promotion", env.adopt_by));
+    }
+    /* `automatic` is the deployment that starts in that mode, so `adopt`
+     * starts its own gateway rather than reusing the import's */
+    let restart_automatic = step == "adopt" && env.adopt_by == "automatic";
     /* `import` starts the gateway `adopt` reuses, and both run alone as
      * well as under `conversion`, so both check what conversion does */
     preflight_rgw(build)?;
@@ -2894,7 +2909,31 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
             .unwrap_or(false),
         _ => false,
     };
-    if serving && step == "adopt" {
+    if restart_automatic {
+        /* the import's gateway, restarted on its own state:  a restart
+         * that cleaned would import the identities again under new ids,
+         * and every owner in the capture would change */
+        if !serving {
+            return Err("adopt_by automatic restarts the import's gateway, and \
+                        none serves this tree;  run `import` first".into());
+        }
+        let mut args = vec!["--restart", "--store", "nsfs", "--adoption-mode", "automatic"];
+        if env.impersonate {
+            args.push("--with-impersonation");
+        }
+        println!("         rgw-vstart.sh {}", args.join(" "));
+        let st = Command::new("bash")
+            .arg(script.display().to_string())
+            .args(&args)
+            .current_dir(build)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|e| format!("cannot run rgw-vstart.sh: {e}"))?;
+        if !st.success() {
+            return Err(format!("rgw-vstart.sh --restart failed ({st})"));
+        }
+    } else if serving && step == "adopt" {
         println!("{tag} RGW already serves this tree;  adopting in place");
     } else {
     println!("         rgw-vstart.sh --store nsfs --data-root {} \
@@ -2974,6 +3013,12 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
                  json_str(&body, "completed_at").unwrap_or_default());
         return Ok(());
     }
+    if restart_automatic {
+        /* startup imported them before it queued a bucket, and a command
+         * now would import them again beside the workers */
+        println!("{tag} identities imported by `import`, and at startup in automatic \
+                  mode against the same database");
+    } else {
     let (status, body) = rgw_call(&admin, "DELETE", &format!("{hint}&identities=true"))?;
     if status != 200 || json_bool(&body, "ran") != Some(true) {
         return Err(format!("importing the identities failed ({status}):\n{body}"));
@@ -2991,6 +3036,7 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
     if json_str(&body, "unresolved_uids").as_deref().unwrap_or("0") != "0" {
         return Err(format!("the import left uids nsswitch did not resolve;  the \
                             gateway log names them:\n{body}"));
+    }
     }
 
     /* The corpus asks the gateway, as the imported IAM user, what that
@@ -3033,6 +3079,12 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
         .collect();
     names.sort();
     let damaged = damaged_id(env);
+    if env.adopt_by != "command" {
+        if env.adopt_by == "promotion" {
+            promotion(env, &admin, &hint, &names)?;
+        }
+        queue_drained(&admin, &hint, names.len(), damaged.is_some())?;
+    } else {
     for name in &names {
         if damaged.is_some() && name == DAMAGED_BUCKET {
             println!("{tag} bucket {name}:  damaged by `damage`;  left for the escape hatch");
@@ -3051,6 +3103,7 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
                  json_str(&body, "objects").unwrap_or_default(),
                  json_str(&body, "versions").unwrap_or_default());
     }
+    }
 
     /* Every bucket is adopted, so a full pass observes the store
      * consumed and writes the completion record.  Required here, because a pass that does not write it
@@ -3059,12 +3112,23 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
         if let Some(id) = &damaged {
             escape_hatch(env, &admin, &hint, id)?;
         }
-        let (status, body) = rgw_call(&admin, "DELETE", &format!("{hint}&run=true"))?;
-        if status != 200 || json_bool(&body, "complete") != Some(true) {
-            return Err(format!(
-                "the full pass did not complete adoption ({status}):  {}\n{body}",
-                json_str(&body, "why_not_complete").unwrap_or_default()));
-        }
+        let body = if env.adopt_by == "command" {
+            let (status, body) = rgw_call(&admin, "DELETE", &format!("{hint}&run=true"))?;
+            if status != 200 || json_bool(&body, "complete") != Some(true) {
+                return Err(format!(
+                    "the full pass did not complete adoption ({status}):  {}\n{body}",
+                    json_str(&body, "why_not_complete").unwrap_or_default()));
+            }
+            body
+        } else {
+            /* the queue observes completion itself:  after it drains, and
+             * after the abandonment that cleared the last record */
+            poll(60, || {
+                let (_, body) = rgw_call(&admin, "DELETE", &hint)?;
+                Ok((json_bool(&body, "complete") == Some(true)).then_some(body))
+            })?.ok_or("the queue did not observe completion within 60s;  nothing \
+                       else in automatic mode would")?
+        };
         println!("{tag} adoption complete at {}",
                  json_str(&body, "completed_at").unwrap_or_default());
         if damaged.is_some() {
@@ -3270,6 +3334,196 @@ fn adopt_by_profile(env: &Env, admin: &str, name: &str) -> Result<(), String> {
             "bucket {name} went from {had:?} to {now:?}, not to shared:\n{body}"));
     }
     println!("adopt    bucket {name}:  profile shared by the profile endpoint");
+    Ok(())
+}
+
+/// Hold or release one bucket's adoption (`inject-hold-adoption`);
+/// returns whether a worker has taken it and is held on it.
+fn hold(env: &Env, admin: &str, bucket: &str, on: bool) -> Result<bool, String> {
+    let (status, body) = rgw_call(admin, "DELETE", &format!(
+        "http://127.0.0.1:{}/admin/driver/hint?hint=inject-hold-adoption&enable={on}&bucket={bucket}",
+        env.rgw_port))?;
+    if status != 200 {
+        return Err(format!("{} {bucket}'s adoption failed ({status}):\n{body}",
+                           if on { "holding" } else { "releasing" }));
+    }
+    Ok(json_bool(&body, "waiting") == Some(true))
+}
+
+/// One of the queue's counts from the `adoption` hint's reply.
+fn queue_count(body: &str, key: &str) -> u64 {
+    json_str(body, &format!("queue_{key}")).and_then(|v| v.parse().ok()).unwrap_or(0)
+}
+
+/// Poll `f` every 100 ms until it returns `Some`, for at most `secs`.
+fn poll<T>(secs: u64, mut f: impl FnMut() -> Result<Option<T>, String>)
+           -> Result<Option<T>, String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if let Some(v) = f()? {
+            return Ok(Some(v));
+        }
+        if std::time::Instant::now() > deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// A PUT of a small object as `who`, timed:  its status, its error
+/// code if any, and how long it took.
+fn timed_put(who: &str, url: &str) -> Result<(u16, Option<String>, std::time::Duration), String> {
+    let t = std::time::Instant::now();
+    let (status, body) = curl(&["-X", "PUT", "--data-binary", "probe",
+                                "--aws-sigv4", "aws:amz:us-east-1:s3", "--user", who, url])?;
+    Ok((status, xml_tag(&body, "Code"), t.elapsed()))
+}
+
+/// `automatic` adoption seen from S3, on the import's gateway:  the
+/// promotion cell.
+///
+/// Every bucket is held before the `adoption` hint switches the gateway
+/// to automatic with one worker, so the worker takes one bucket and is
+/// held on it, and nothing else is adopted until the checks release it:
+///
+/// 1. a request on another bucket promotes it and waits its quantum:  a
+///    read is served as found, a write is refused 503 ServiceUnavailable;
+/// 2. released, the worker takes the promoted bucket next, ahead of the
+///    backfill;
+/// 3. a write that waits while the promoted bucket is released is served
+///    adopted, inside its quantum.
+///
+/// The probe object is deleted, in an unversioned bucket, so the
+/// capture after `adopt` sees nothing of it.
+fn promotion(env: &Env, admin: &str, hint: &str, names: &[String]) -> Result<(), String> {
+    let base = format!("http://127.0.0.1:{}", env.rgw_port);
+    for n in names {
+        hold(env, admin, n, true)?;
+    }
+    let (status, body) = rgw_call(admin, "DELETE",
+        &format!("{hint}&mode=automatic&workers=1&wait_ms=1000"))?;
+    if status != 200 || json_str(&body, "mode").as_deref() != Some("automatic")
+        || json_field(&body, "queue_queued").is_none() {
+        return Err(format!("switching to automatic did not start the queue ({status}):\n{body}"));
+    }
+    println!("adopt    automatic by the hint, one worker, every bucket held");
+
+    /* the one bucket the worker took */
+    let first = poll(30, || {
+        for n in names {
+            if hold(env, admin, n, true)? {
+                return Ok(Some(n.clone()));
+            }
+        }
+        Ok(None)
+    })?.ok_or("no worker took a bucket within 30s of the switch")?;
+    println!("adopt    the worker took {first}, and is held on it");
+
+    /* a bucket the worker did not take, with its owner's keys */
+    let account = format!("{}:{}", env.access_key, env.secret_key);
+    let dn = format!("{}:{}", env.dn_access_key, env.dn_secret_key);
+    let (target, owner) = [(env.bucket.as_str(), account.as_str()),
+                           (NSSWITCH_BUCKET, dn.as_str())]
+        .into_iter()
+        .find(|(b, _)| *b != first && names.iter().any(|n| n == b))
+        .ok_or("neither the account's bucket nor nsswitch is in the store")?;
+    let probe = format!("{base}/{target}/promotion-probe");
+
+    /* 1.  past the quantum */
+    let t = std::time::Instant::now();
+    let (status, _) = rgw_call(owner, "GET", &format!("{base}/{target}?list-type=2"))?;
+    let read_took = t.elapsed();
+    if status != 200 {
+        return Err(format!("a read of {target} not yet adopted was not served as found ({status})"));
+    }
+    let (status, code, write_took) = timed_put(owner, &probe)?;
+    if status != 503 || code.as_deref() != Some("ServiceUnavailable") {
+        return Err(format!("a write to {target} not yet adopted, past its quantum, returned \
+                            {status} {code:?};  503 ServiceUnavailable expected"));
+    }
+    for (what, took) in [("read", read_took), ("write", write_took)] {
+        if took < std::time::Duration::from_millis(900) {
+            return Err(format!("the {what} of {target} returned in {took:?}, before its \
+                                1000 ms quantum:  it did not wait"));
+        }
+    }
+    let (_, body) = rgw_call(admin, "DELETE", hint)?;
+    /* a request can load its bucket more than once, and each load waits */
+    let timed_out = queue_count(&body, "waits_timed_out");
+    if queue_count(&body, "promotions") != 1 || timed_out < 2 {
+        return Err(format!("after a read and a write of {target}, one promotion and at \
+                            least two timed-out waits expected:\n{body}"));
+    }
+    println!("adopt    {target}:  promoted;  past its quantum a read is served as found, \
+              a write 503 ServiceUnavailable");
+
+    /* 2.  next after the bucket the worker holds */
+    hold(env, admin, &first, false)?;
+    poll(120, || Ok(hold(env, admin, target, true)?.then_some(())))?
+        .ok_or_else(|| format!("{first} released, the worker did not take {target} \
+                                within 120s"))?;
+    let (_, body) = rgw_call(admin, "DELETE", hint)?;
+    if queue_count(&body, "adopted") + queue_count(&body, "failed") != 1 {
+        return Err(format!("the worker took {target} after other buckets than {first}:\n{body}"));
+    }
+    println!("adopt    {first} released, the worker took {target} next, ahead of the backfill");
+
+    /* 3.  inside the quantum */
+    let (_, body) = rgw_call(admin, "DELETE", &format!("{hint}&wait_ms=120000"))?;
+    if json_str(&body, "wait_ms").as_deref() != Some("120000") {
+        return Err(format!("the quantum did not change:\n{body}"));
+    }
+    let (who, url) = (owner.to_string(), probe.clone());
+    let put = std::thread::spawn(move || timed_put(&who, &url));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    hold(env, admin, target, false)?;
+    let (status, code, took) = put.join().map_err(|_| "the waiting write panicked")??;
+    if status != 200 {
+        return Err(format!("a write to {target} waiting for its adoption returned {status} \
+                            {code:?} after {took:?};  served adopted expected"));
+    }
+    let (_, body) = rgw_call(admin, "DELETE", hint)?;
+    if queue_count(&body, "waits_timed_out") != timed_out || queue_count(&body, "adopted") < 1 {
+        return Err(format!("the waiting write was served, but the queue does not show \
+                            {target} adopted inside the wait:\n{body}"));
+    }
+    let (status, _) = rgw_call(owner, "DELETE", &probe)?;
+    if status != 204 {
+        return Err(format!("deleting the probe from {target} returned {status}"));
+    }
+    println!("adopt    {target}:  a write waiting {took:?} was served adopted;  probe deleted");
+
+    let (status, body) = rgw_call(admin, "DELETE", &format!("{hint}&wait_ms=1000"))?;
+    if status != 200 {
+        return Err(format!("restoring the quantum failed ({status}):\n{body}"));
+    }
+    for n in names {
+        hold(env, admin, n, false)?;
+    }
+    Ok(())
+}
+
+/// Wait for the queue to empty after `automatic` adoption, and require
+/// what it did:  every bucket adopted but the damaged one, which fails.
+fn queue_drained(admin: &str, hint: &str, buckets: usize, damaged: bool)
+                 -> Result<(), String> {
+    let body = poll(600, || {
+        let (status, body) = rgw_call(admin, "DELETE", hint)?;
+        if status != 200 || json_field(&body, "queue_queued").is_none() {
+            return Err(format!("the gateway has no adoption queue ({status}):\n{body}"));
+        }
+        Ok((queue_count(&body, "queued") == 0 && queue_count(&body, "running") == 0)
+           .then_some(body))
+    })?.ok_or("the adoption queue did not empty within 600s")?;
+    let (adopted, failed) = (queue_count(&body, "adopted"), queue_count(&body, "failed"));
+    let want_failed = u64::from(damaged);
+    if adopted + want_failed != buckets as u64 || failed != want_failed {
+        return Err(format!("the queue adopted {adopted} and failed {failed} of {buckets} \
+                            buckets;  {} and {want_failed} expected.  The gateway log names \
+                            each failure:\n{body}", buckets as u64 - want_failed));
+    }
+    println!("adopt    the queue adopted {adopted} buckets{}",
+             if damaged { format!(" and failed {DAMAGED_BUCKET}, as damaged") } else { String::new() });
     Ok(())
 }
 

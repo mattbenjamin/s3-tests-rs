@@ -173,6 +173,29 @@ the `adoption` hint reports that a gateway already serves this tree,
 and would re-import the identities under new ids, so the two captures
 would see different owners.
 
+**`ADOPTION_ADOPT_BY`** says what adopts the tree at `adopt`.
+`command`, the default, is the sequence above.  The other two let
+`automatic`'s queue adopt it instead (`NSFS_ADOPTION.md` §9), and both
+then wait for the queue to empty and require every bucket adopted but
+`corpus-damaged`, which must fail.  The escape hatch runs as above, and
+completion must then come from the queue alone, within 60 s, with no
+`run=true`.
+
+- **`automatic`** restarts the import's gateway with
+  `rgw-vstart.sh --restart --adoption-mode automatic`.  `--restart` runs
+  no `vstart.sh` and cleans nothing, so the userdb the import wrote, and
+  the account ids the unadopted capture saw, stay.  The queue starts
+  with the gateway, as a deployment's does.
+- **`promotion`** keeps the import's gateway in `command` mode, holds
+  every bucket (`inject-hold-adoption`), and switches it to `automatic`
+  with one worker through the `adoption` hint.  It then checks, on a
+  bucket the worker did not take:  a read past its 1 s quantum is served
+  as found, a write past it gets 503 ServiceUnavailable, and both waited;
+  released, the worker takes that bucket next, ahead of the backfill;
+  and a write waiting while it is released is served adopted.  The probe
+  object goes in the unversioned `adoption` bucket, or `nsswitch` if the
+  worker took `adoption` first, and is deleted.
+
 Each capture runs the corpus in observe mode.  Besides the axes,
 it checks the imported identities (`test_corpus/identity.rs`):  the
 account's user is its root, and the IAM user has a row of its own, a
