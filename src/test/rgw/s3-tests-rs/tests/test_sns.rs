@@ -2237,6 +2237,38 @@ mod http_event_types {
         s3.delete_bucket().bucket(&bucket).send().await.unwrap();
     }
 
+    /* The bucket ARN is one of the two forms rgw_notification_bucket_arn_region
+     * allows:  AWS's, arn:aws:s3:::<bucket>, or the zonegroup in the
+     * region field, which must then be the record's awsRegion.  Never an
+     * account. */
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_bucket_arn_http() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let (sns, s3) = (get_sns_root_client(), get_iam_root_s3client());
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let receiver = HttpReceiver::start().await;
+        let topic_arn = notify_on(&sns, &s3, &bucket, &receiver,
+            vec![Event::S3ObjectCreated]).await;
+
+        s3.put_object().bucket(&bucket).key("arn")
+            .body(ByteStream::from_static(b"arn")).send().await.unwrap();
+        settle().await;
+        let got = records(&receiver.take());
+        assert_eq!(got.len(), 1, "{got:?}");
+        let arn = got[0]["s3"]["bucket"]["arn"].as_str().unwrap_or_default().to_string();
+        let region = got[0]["awsRegion"].as_str().unwrap_or_default();
+        let aws = format!("arn:aws:s3:::{bucket}");
+        let zonegroup = format!("arn:aws:s3:{region}::{bucket}");
+        assert!(arn == aws || (!region.is_empty() && arn == zonegroup),
+                "bucket ARN {arn:?} is neither {aws:?} nor {zonegroup:?}");
+
+        s3.delete_object().bucket(&bucket).key("arn").send().await.unwrap();
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
     #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
     #[tokio::test]
     async fn test_notification_object_acl_http() {
