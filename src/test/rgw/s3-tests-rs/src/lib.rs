@@ -9,5 +9,6 @@ pub mod features;
 pub mod fixtures;
 pub mod hints;
 pub mod http;
+pub mod notify_receiver;
 pub mod policy;
 pub mod random;

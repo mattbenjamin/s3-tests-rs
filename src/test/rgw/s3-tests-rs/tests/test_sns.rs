@@ -1,4 +1,4 @@
-//! Notification topics and Kafka delivery.
+//! Notification topics, and delivery to Kafka and HTTP endpoints.
 //!
 //! Two sources.  Four tests -- the account and cross-account topic
 //! ones -- are translated from the vendored
@@ -12,9 +12,14 @@
 //! correspondence is by behaviour rather than one-to-one:  filters,
 //! event fields, multipart, copy, multi-delete, topic attributes.
 //! Persistent topics, AMQP and multisite are deliberately not ported.
+//! The Kafka tests need a Kafka broker -- `kafka-vstart.sh`, or
+//! `[kafka] broker` in the config -- and are gated behind `has_kafka`.
 //!
-//! Needs a Kafka broker -- `kafka-vstart.sh`, or `[kafka] broker` in
-//! the config -- and is gated behind `has_kafka`.
+//! The HTTP subset of the same program, in `http_tests`, keeps its
+//! names:  the five tests whose topics are not persistent, against an
+//! endpoint the test starts in its own process
+//! (`s3_tests_rs::notify_receiver`), so they need nothing started and
+//! run wherever the suite does.
 
 use s3_tests_rs::client::{
     get_iam_root_s3client,
@@ -346,7 +351,7 @@ mod kafka_tests {
             .body(ByteStream::from_static(b"hello kafka"))
             .send().await.unwrap();
 
-        let msg = wait_for_event(&consumer, obj_key, "s3:ObjectCreated:").await;
+        let msg = wait_for_event(&consumer, obj_key, "ObjectCreated:").await;
 
         let record = &msg["Records"][0];
         assert_eq!(record["s3"]["object"]["key"].as_str().unwrap(), obj_key);
@@ -403,7 +408,7 @@ mod kafka_tests {
             .key(obj_key)
             .send().await.unwrap();
 
-        let msg = wait_for_event(&consumer, obj_key, "s3:ObjectRemoved:").await;
+        let msg = wait_for_event(&consumer, obj_key, "ObjectRemoved:").await;
 
         let record = &msg["Records"][0];
         assert_eq!(record["s3"]["object"]["key"].as_str().unwrap(), obj_key);
@@ -479,12 +484,12 @@ mod kafka_tests {
             .body(ByteStream::from_static(body))
             .send().await.unwrap();
 
-        let msg = wait_for_event(&consumer, obj_key, "s3:ObjectCreated:").await;
+        let msg = wait_for_event(&consumer, obj_key, "ObjectCreated:").await;
         let record = &msg["Records"][0];
 
         assert_eq!(record["eventVersion"].as_str().unwrap(), "2.2");
         assert_eq!(record["eventSource"].as_str().unwrap(), "ceph:s3");
-        assert!(record["eventName"].as_str().unwrap().starts_with("s3:ObjectCreated:"));
+        assert!(record["eventName"].as_str().unwrap().starts_with("ObjectCreated:"));
         assert_eq!(record["s3"]["bucket"]["name"].as_str().unwrap(), bucket);
         assert_eq!(record["s3"]["object"]["key"].as_str().unwrap(), obj_key);
         assert_eq!(record["s3"]["object"]["size"].as_u64().unwrap(), body.len() as u64);
@@ -516,7 +521,7 @@ mod kafka_tests {
             .body(ByteStream::from_static(b"copy source data"))
             .send().await.unwrap();
 
-        let _ = wait_for_event(&consumer, src_key, "s3:ObjectCreated:").await;
+        let _ = wait_for_event(&consumer, src_key, "ObjectCreated:").await;
 
         let dst_key = "copy-dest";
         s3.copy_object()
@@ -525,7 +530,7 @@ mod kafka_tests {
             .copy_source(format!("{}/{}", bucket, src_key))
             .send().await.unwrap();
 
-        let msg = wait_for_event(&consumer, dst_key, "s3:ObjectCreated:").await;
+        let msg = wait_for_event(&consumer, dst_key, "ObjectCreated:").await;
         let record = &msg["Records"][0];
         assert_eq!(record["s3"]["object"]["key"].as_str().unwrap(), dst_key);
 
@@ -576,7 +581,7 @@ mod kafka_tests {
                                         .and_then(|r| r.as_array())
                                         .and_then(|a| a.first())
                                     {
-                                        if record["eventName"].as_str().unwrap_or("").starts_with("s3:ObjectRemoved:") {
+                                        if record["eventName"].as_str().unwrap_or("").starts_with("ObjectRemoved:") {
                                             return record["s3"]["object"]["key"].as_str().unwrap().to_string();
                                         }
                                     }
@@ -682,7 +687,7 @@ mod kafka_tests {
             )
             .send().await.unwrap();
 
-        let msg = wait_for_event(&consumer, obj_key, "s3:ObjectCreated:").await;
+        let msg = wait_for_event(&consumer, obj_key, "ObjectCreated:").await;
         let record = &msg["Records"][0];
         assert_eq!(record["s3"]["object"]["key"].as_str().unwrap(), obj_key);
         assert!(record["s3"]["object"]["size"].as_u64().unwrap() > 0);
@@ -752,7 +757,7 @@ mod kafka_tests {
             .body(ByteStream::from_static(b"should notify"))
             .send().await.unwrap();
 
-        let msg = wait_for_event(&consumer, "logs/access.log", "s3:ObjectCreated:").await;
+        let msg = wait_for_event(&consumer, "logs/access.log", "ObjectCreated:").await;
         assert_eq!(msg["Records"][0]["s3"]["object"]["key"].as_str().unwrap(), "logs/access.log");
 
         let no_match = timeout(Duration::from_secs(3), async {
@@ -842,12 +847,12 @@ mod kafka_tests {
             .body(ByteStream::from_static(b"hello"))
             .send().await.unwrap();
 
-        let msg = wait_for_event(&create_consumer, obj_key, "s3:ObjectCreated:").await;
+        let msg = wait_for_event(&create_consumer, obj_key, "ObjectCreated:").await;
         assert_eq!(msg["Records"][0]["s3"]["object"]["key"].as_str().unwrap(), obj_key);
 
         s3.delete_object().bucket(&bucket).key(obj_key).send().await.unwrap();
 
-        let msg = wait_for_event(&delete_consumer, obj_key, "s3:ObjectRemoved:").await;
+        let msg = wait_for_event(&delete_consumer, obj_key, "ObjectRemoved:").await;
         assert_eq!(msg["Records"][0]["s3"]["object"]["key"].as_str().unwrap(), obj_key);
 
         nuke_topics(&sns, &get_topic_prefix()).await;
@@ -884,7 +889,7 @@ mod kafka_tests {
             .body(ByteStream::from_static(b"my data"))
             .send().await.unwrap();
 
-        let msg = wait_for_event(&consumer, "my-obj", "s3:ObjectCreated:").await;
+        let msg = wait_for_event(&consumer, "my-obj", "ObjectCreated:").await;
         assert_eq!(msg["Records"][0]["s3"]["bucket"]["name"].as_str().unwrap(), bucket);
 
         let leak = timeout(Duration::from_secs(3), async {
@@ -936,7 +941,7 @@ mod kafka_tests {
             .body(ByteStream::from_static(b"fire and forget"))
             .send().await.unwrap();
 
-        let msg = wait_for_event(&consumer, obj_key, "s3:ObjectCreated:").await;
+        let msg = wait_for_event(&consumer, obj_key, "ObjectCreated:").await;
         assert_eq!(msg["Records"][0]["s3"]["object"]["key"].as_str().unwrap(), obj_key);
 
         nuke_topics(&sns, &get_topic_prefix()).await;
@@ -964,7 +969,7 @@ mod kafka_tests {
 
         s3.delete_object().bucket(&bucket).key(obj_key).send().await.unwrap();
 
-        let msg = wait_for_event(&consumer, obj_key, "s3:ObjectRemoved:").await;
+        let msg = wait_for_event(&consumer, obj_key, "ObjectRemoved:").await;
         assert_eq!(msg["Records"][0]["s3"]["object"]["key"].as_str().unwrap(), obj_key);
 
         nuke_topics(&sns, &get_topic_prefix()).await;
@@ -1004,7 +1009,7 @@ mod kafka_tests {
                                         .and_then(|r| r.as_array())
                                         .and_then(|a| a.first())
                                     {
-                                        if record["eventName"].as_str().unwrap_or("").starts_with("s3:ObjectCreated:") {
+                                        if record["eventName"].as_str().unwrap_or("").starts_with("ObjectCreated:") {
                                             return record["s3"]["object"]["key"].as_str().unwrap().to_string();
                                         }
                                     }
@@ -1089,7 +1094,7 @@ mod kafka_tests {
             .body(ByteStream::from_static(b"match"))
             .send().await.unwrap();
 
-        let msg = wait_for_event(&consumer, "photo.jpg", "s3:ObjectCreated:").await;
+        let msg = wait_for_event(&consumer, "photo.jpg", "ObjectCreated:").await;
         assert_eq!(msg["Records"][0]["s3"]["object"]["key"].as_str().unwrap(), "photo.jpg");
 
         let no_match = timeout(Duration::from_secs(3), async {
@@ -1164,12 +1169,12 @@ mod kafka_tests {
             .body(ByteStream::from_static(b"create then delete"))
             .send().await.unwrap();
 
-        let create_msg = wait_for_event(&consumer, obj_key, "s3:ObjectCreated:").await;
+        let create_msg = wait_for_event(&consumer, obj_key, "ObjectCreated:").await;
         assert_eq!(create_msg["Records"][0]["s3"]["object"]["key"].as_str().unwrap(), obj_key);
 
         s3.delete_object().bucket(&bucket).key(obj_key).send().await.unwrap();
 
-        let delete_msg = wait_for_event(&consumer, obj_key, "s3:ObjectRemoved:").await;
+        let delete_msg = wait_for_event(&consumer, obj_key, "ObjectRemoved:").await;
         assert_eq!(delete_msg["Records"][0]["s3"]["object"]["key"].as_str().unwrap(), obj_key);
 
         nuke_topics(&sns, &get_topic_prefix()).await;
@@ -1197,7 +1202,7 @@ mod kafka_tests {
             .body(ByteStream::from_static(b"version 1"))
             .send().await.unwrap();
 
-        let msg1 = wait_for_event(&consumer, obj_key, "s3:ObjectCreated:").await;
+        let msg1 = wait_for_event(&consumer, obj_key, "ObjectCreated:").await;
         let size1 = msg1["Records"][0]["s3"]["object"]["size"].as_u64().unwrap();
         assert_eq!(size1, 9);
 
@@ -1207,7 +1212,7 @@ mod kafka_tests {
             .body(ByteStream::from_static(b"version 2 with more data"))
             .send().await.unwrap();
 
-        let msg2 = wait_for_event(&consumer, obj_key, "s3:ObjectCreated:").await;
+        let msg2 = wait_for_event(&consumer, obj_key, "ObjectCreated:").await;
         let size2 = msg2["Records"][0]["s3"]["object"]["size"].as_u64().unwrap();
         assert_eq!(size2, 24);
         assert_ne!(
@@ -1240,7 +1245,7 @@ mod kafka_tests {
             .body(ByteStream::from(body))
             .send().await.unwrap();
 
-        let msg = wait_for_event(&consumer, obj_key, "s3:ObjectCreated:").await;
+        let msg = wait_for_event(&consumer, obj_key, "ObjectCreated:").await;
         let size = msg["Records"][0]["s3"]["object"]["size"].as_u64().unwrap();
         assert_eq!(size, 1024 * 1024, "event should report exact object size");
 
@@ -1384,7 +1389,7 @@ mod kafka_tests {
             .body(ByteStream::from_static(b"match"))
             .send().await.unwrap();
 
-        let msg = wait_for_event(&consumer, "images/icon.png", "s3:ObjectCreated:").await;
+        let msg = wait_for_event(&consumer, "images/icon.png", "ObjectCreated:").await;
         assert_eq!(msg["Records"][0]["s3"]["object"]["key"].as_str().unwrap(), "images/icon.png");
 
         // verify the non-matching ones didn't arrive
@@ -1669,7 +1674,7 @@ mod kafka_tests {
             .body(ByteStream::from_static(b"matching metadata"))
             .send().await.unwrap();
 
-        let msg = wait_for_event(&consumer, "blue-obj", "s3:ObjectCreated:").await;
+        let msg = wait_for_event(&consumer, "blue-obj", "ObjectCreated:").await;
         assert_eq!(msg["Records"][0]["s3"]["object"]["key"].as_str().unwrap(), "blue-obj");
 
         let leak = timeout(Duration::from_secs(3), async {
@@ -1764,7 +1769,7 @@ mod kafka_tests {
             .body(ByteStream::from_static(b"matching tag"))
             .send().await.unwrap();
 
-        let msg = wait_for_event(&consumer, "prod-obj", "s3:ObjectCreated:").await;
+        let msg = wait_for_event(&consumer, "prod-obj", "ObjectCreated:").await;
         assert_eq!(msg["Records"][0]["s3"]["object"]["key"].as_str().unwrap(), "prod-obj");
 
         let leak = timeout(Duration::from_secs(3), async {
@@ -1791,5 +1796,361 @@ mod kafka_tests {
         assert!(leak.is_err(), "received event for non-matching tag value");
 
         nuke_topics(&sns, &get_topic_prefix()).await;
+    }
+}
+
+/* The HTTP subset of test_bn.py, against an endpoint in the test process
+ * (s3_tests_rs::notify_receiver).  The five tests whose topics are not
+ * persistent;  test_lifecycle_http, test_lifecycle_abort_mpu and
+ * test_metadata_filter_http make theirs persistent and wait on the
+ * queue, so they go with persistent delivery (work plan, Future work 6).
+ * Each keeps test_bn.py's name. */
+mod http_tests {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use aws_sdk_s3::primitives::ByteStream;
+    use aws_sdk_s3::types::{Delete, NotificationConfiguration, ObjectIdentifier,
+                            TopicConfiguration};
+    use md5::{Digest, Md5};
+    use rand::{Rng, RngCore};
+
+    use s3_tests_rs::client::{get_iam_root_s3client, get_sns_root_client};
+    use s3_tests_rs::fixtures::get_new_bucket_name;
+    use s3_tests_rs::notify_receiver::{HttpReceiver, Received};
+
+    const META_PREFIX: &str = "x-amz-meta-";
+
+    /* test_bn.py writes str(os.urandom(n)), a Python repr about four
+     * times n long;  n random bytes is the intent */
+    fn random_content(n: usize) -> Vec<u8> {
+        let mut v = vec![0u8; n];
+        rand::thread_rng().fill_bytes(&mut v);
+        v
+    }
+
+    fn md5_hex(b: &[u8]) -> String {
+        hex::encode(Md5::digest(b))
+    }
+
+    /* a topic pushing to `receiver`, and a notification on `bucket` for
+     * `events`, empty meaning every event (PSTopicS3, PSNotificationS3) */
+    async fn topic_and_notification(
+        sns: &aws_sdk_sns::Client,
+        s3: &aws_sdk_s3::Client,
+        bucket: &str,
+        receiver: &HttpReceiver,
+        attributes: &[(&str, &str)],
+        events: Vec<aws_sdk_s3::types::Event>,
+    ) -> String {
+        let mut req = sns.create_topic().name(format!("{bucket}_topic"))
+            .attributes("push-endpoint", receiver.endpoint());
+        for (k, v) in attributes {
+            req = req.attributes(*k, *v);
+        }
+        let topic_arn = req.send().await.unwrap().topic_arn().unwrap().to_string();
+        s3.put_bucket_notification_configuration()
+            .bucket(bucket)
+            .notification_configuration(
+                NotificationConfiguration::builder()
+                    .topic_configurations(
+                        TopicConfiguration::builder()
+                            .id(format!("{bucket}_notif"))
+                            .topic_arn(&topic_arn)
+                            .set_events(Some(events))
+                            .build()
+                            .unwrap(),
+                    )
+                    .build(),
+            )
+            .send().await.unwrap();
+        topic_arn
+    }
+
+    /* the bucket's objects as test_bn.py's bucket.list() gives them:
+     * name and ETag, unquoted */
+    async fn list_keys(s3: &aws_sdk_s3::Client, bucket: &str) -> Vec<(String, String)> {
+        let resp = s3.list_objects_v2().bucket(bucket).send().await.unwrap();
+        resp.contents().iter()
+            .map(|o| (o.key().unwrap().to_string(),
+                      o.e_tag().unwrap_or_default().trim_matches('"').to_string()))
+            .collect()
+    }
+
+    /* verify_s3_records_by_elements, for a list of POSTs:  for each key,
+     * a record of the right kind, with an eTag, metadata keys under the
+     * prefix and, given sizes, the object's size;  given etags, the
+     * listed ETag is among them;  and, exact, no superfluous record */
+    fn verify_records(
+        received: &[Received],
+        bucket: &str,
+        keys: &[(String, String)],
+        exact_match: bool,
+        deletions: bool,
+        expected_sizes: Option<&HashMap<String, u64>>,
+        etags: Option<&[String]>,
+    ) {
+        for (name, etag) in keys {
+            let mut found: Option<u64> = None;
+            'posts: for post in received {
+                for record in post.body["Records"].as_array().expect("a Records list") {
+                    let object = &record["s3"]["object"];
+                    assert!(object.get("eTag").is_some(), "a record without an eTag: {record}");
+                    if record["s3"]["bucket"]["name"] != bucket || object["key"] != name.as_str() {
+                        continue;
+                    }
+                    if let Some(etags) = etags {
+                        assert!(etags.contains(etag), "{name}'s ETag {etag} is not its content's MD5");
+                    }
+                    for meta in object["metadata"].as_array().into_iter().flatten() {
+                        assert!(meta["key"].as_str().unwrap_or_default().starts_with(META_PREFIX),
+                                "metadata outside {META_PREFIX}: {meta}");
+                    }
+                    let event = record["eventName"].as_str().unwrap_or_default();
+                    let kind = if deletions { "ObjectRemoved" } else { "ObjectCreated" };
+                    if event.starts_with(kind) {
+                        found = Some(object["size"].as_u64().unwrap_or(0));
+                        break 'posts;
+                    }
+                }
+            }
+            let size = found.unwrap_or_else(|| panic!(
+                "no {} event found for key: {name};  {} POSTs, the first:  {}",
+                if deletions { "deletion" } else { "creation" }, received.len(),
+                received.first().map_or("none".into(), |p| p.body.to_string())));
+            if let Some(sizes) = expected_sizes {
+                assert_eq!(Some(&size), sizes.get(name), "{name}'s size in its event");
+            }
+        }
+        if exact_match {
+            assert_eq!(received.len(), keys.len(), "superfluous records are found");
+        }
+    }
+
+    async fn wait_for_the_messages() {
+        /* test_bn.py:  "wait for 5sec for the messages" */
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+
+    /* notification('http', conn, cloudevents=...) */
+    async fn notification_http(cloudevents: bool) {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        let s3 = get_iam_root_s3client();
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let receiver = HttpReceiver::start().await;
+        let attrs: &[(&str, &str)] = if cloudevents { &[("cloudevents", "true")] } else { &[] };
+        let topic_arn = topic_and_notification(&sns, &s3, &bucket, &receiver, attrs, vec![]).await;
+
+        let number_of_objects = if cloudevents { 10 } else { 100 };
+        let mut etags = Vec::new();
+        let mut sizes = HashMap::new();
+        let mut puts = Vec::new();
+        for i in 0..number_of_objects {
+            let content = random_content(1024 * 1024);
+            etags.push(md5_hex(&content));
+            sizes.insert(i.to_string(), content.len() as u64);
+            let (s3, bucket) = (s3.clone(), bucket.clone());
+            puts.push(tokio::spawn(async move {
+                s3.put_object().bucket(&bucket).key(i.to_string())
+                    .body(ByteStream::from(content)).send().await.unwrap();
+            }));
+        }
+        for p in puts {
+            p.await.unwrap();
+        }
+        wait_for_the_messages().await;
+
+        let keys = list_keys(&s3, &bucket).await;
+        let md5 = !s3_tests_rs::features::non_md5_etag().await;
+        let received = receiver.take();
+        if cloudevents {
+            check_cloudevents(&received);
+        }
+        verify_records(&received, &bucket, &keys, true, false, Some(&sizes),
+                       md5.then_some(etags.as_slice()));
+
+        let mut deletes = Vec::new();
+        for (name, _) in &keys {
+            let (s3, bucket, name) = (s3.clone(), bucket.clone(), name.clone());
+            deletes.push(tokio::spawn(async move {
+                s3.delete_object().bucket(&bucket).key(&name).send().await.unwrap();
+            }));
+        }
+        for d in deletes {
+            d.await.unwrap();
+        }
+        wait_for_the_messages().await;
+        let received = receiver.take();
+        if cloudevents {
+            check_cloudevents(&received);
+        }
+        verify_records(&received, &bucket, &keys, true, true, Some(&sizes),
+                       md5.then_some(etags.as_slice()));
+
+        remove_notifications(&s3, &bucket).await;
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
+    /* HTTPPostHandler's checks under cloudevents=True, per POST */
+    fn check_cloudevents(received: &[Received]) {
+        for post in received {
+            let h = &post.headers;
+            let record = &post.body["Records"][0];
+            let get = |k: &str| h.get(k).map(String::as_str).unwrap_or_default();
+            assert_eq!(get("ce-specversion"), "1.0");
+            assert_eq!(get("ce-id"), format!("{}.{}",
+                record["responseElements"]["x-amz-request-id"].as_str().unwrap_or_default(),
+                record["responseElements"]["x-amz-id-2"].as_str().unwrap_or_default()));
+            assert_eq!(get("ce-source"), format!("ceph:s3.{}.{}",
+                record["awsRegion"].as_str().unwrap_or_default(),
+                record["s3"]["bucket"]["name"].as_str().unwrap_or_default()));
+            assert_eq!(get("ce-type"), format!("com.amazonaws.{}",
+                record["eventName"].as_str().unwrap_or_default()));
+            assert_eq!(get("content-type"), "application/json");
+            assert_eq!(get("ce-subject"), record["s3"]["object"]["key"].as_str().unwrap_or_default());
+            /* dateutil's parse() gives a datetime, which holds
+             * microseconds:  ce-time carries nanoseconds and eventTime
+             * microseconds, and the two compare at that resolution */
+            let parse = |t: &str| {
+                let d = chrono::DateTime::parse_from_rfc3339(t)
+                    .unwrap_or_else(|e| panic!("not a time ({e}): {t:?}"));
+                chrono::DurationRound::duration_trunc(d, chrono::TimeDelta::microseconds(1))
+                    .unwrap()
+            };
+            assert_eq!(parse(get("ce-time")),
+                       parse(record["eventTime"].as_str().unwrap_or_default()));
+        }
+    }
+
+    /* PSNotificationS3.del_config():  an empty configuration */
+    async fn remove_notifications(s3: &aws_sdk_s3::Client, bucket: &str) {
+        s3.put_bucket_notification_configuration().bucket(bucket)
+            .notification_configuration(NotificationConfiguration::builder().build())
+            .send().await.unwrap();
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_http() {
+        notification_http(false).await;
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_cloudevents() {
+        notification_http(true).await;
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_opaque_data() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        let s3 = get_iam_root_s3client();
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let receiver = HttpReceiver::start().await;
+        let opaque_data = "http://1.2.3.4:8888";
+        let topic_arn = topic_and_notification(&sns, &s3, &bucket, &receiver,
+                                               &[("OpaqueData", opaque_data)], vec![]).await;
+
+        let mut puts = Vec::new();
+        for i in 0..10 {
+            let (s3, bucket) = (s3.clone(), bucket.clone());
+            puts.push(tokio::spawn(async move {
+                s3.put_object().bucket(&bucket).key(i.to_string())
+                    .body(ByteStream::from_static(b"bar")).send().await.unwrap();
+            }));
+        }
+        for p in puts {
+            p.await.unwrap();
+        }
+        wait_for_the_messages().await;
+
+        for post in receiver.take() {
+            assert_eq!(post.body["Records"][0]["opaqueData"].as_str(), Some(opaque_data));
+        }
+
+        for (name, _) in list_keys(&s3, &bucket).await {
+            s3.delete_object().bucket(&bucket).key(&name).send().await.unwrap();
+        }
+        remove_notifications(&s3, &bucket).await;
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_multi_delete() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        let s3 = get_iam_root_s3client();
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let receiver = HttpReceiver::start().await;
+        let topic_arn = topic_and_notification(&sns, &s3, &bucket, &receiver, &[],
+            vec![aws_sdk_s3::types::Event::S3ObjectRemoved]).await;
+
+        let mut sizes = HashMap::new();
+        let mut puts = Vec::new();
+        for i in 0..10 {
+            let content = random_content(rand::thread_rng().gen_range(1..=1024));
+            sizes.insert(i.to_string(), content.len() as u64);
+            let (s3, bucket) = (s3.clone(), bucket.clone());
+            puts.push(tokio::spawn(async move {
+                s3.put_object().bucket(&bucket).key(i.to_string())
+                    .body(ByteStream::from(content)).send().await.unwrap();
+            }));
+        }
+        for p in puts {
+            p.await.unwrap();
+        }
+        let keys = list_keys(&s3, &bucket).await;
+
+        /* delete_all_objects():  one multi-object delete */
+        let objects = keys.iter()
+            .map(|(k, _)| ObjectIdentifier::builder().key(k).build().unwrap())
+            .collect::<Vec<_>>();
+        s3.delete_objects().bucket(&bucket)
+            .delete(Delete::builder().set_objects(Some(objects)).build().unwrap())
+            .send().await.unwrap();
+        wait_for_the_messages().await;
+
+        verify_records(&receiver.take(), &bucket, &keys, true, true, Some(&sizes), None);
+
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        remove_notifications(&s3, &bucket).await;
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
+    /* multipart_endpoint_agnostic('http', conn):  despite the name, one
+     * 20 MiB PUT, as boto2's set_contents_from_string is */
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_multipart_http() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        let s3 = get_iam_root_s3client();
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let receiver = HttpReceiver::start().await;
+        let topic_arn = topic_and_notification(&sns, &s3, &bucket, &receiver, &[], vec![]).await;
+
+        s3.put_object().bucket(&bucket).key("obj")
+            .body(ByteStream::from(random_content(20 * 1024 * 1024))).send().await.unwrap();
+        wait_for_the_messages().await;
+
+        let keys = list_keys(&s3, &bucket).await;
+        verify_records(&receiver.take(), &bucket, &keys, true, false, None, None);
+
+        remove_notifications(&s3, &bucket).await;
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        for (name, _) in keys {
+            s3.delete_object().bucket(&bucket).key(&name).send().await.unwrap();
+        }
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
     }
 }

@@ -18,7 +18,7 @@ Targets Ceph RGW (and any S3-compatible endpoint) using the Rust-native AWS SDK.
 | `test_s3` | 751 | `test_s3.py`, `test_headers.py`, `rgw_multi/tests.py` |
 | `test_iam` | 75 | `test_iam.py`, `test_sts.py`, plus new account coverage |
 | `test_rgw` | 81 | original to this project, except `quota.rs` from `s3_user_quota.pl` |
-| `test_sns` | 26 | `test_sns.py`, plus the Kafka subset of `test_bn.py` |
+| `test_sns` | 31 | `test_sns.py`;  the HTTP subset of `test_bn.py`;  Kafka scenarios derived from it |
 | `test_bench` | 7 | original — `elbencho` automation |
 | `test_corpus` | 12 | original — see `tests/test_corpus/README.md` |
 
@@ -386,7 +386,7 @@ Tests that need them are `#[ignore]`'d with a reason string.
 |---|---|---|
 | **KMS (Vault or GKLM)** | SSE-KMS encryption | 9 |
 | **OIDC IdP (Keycloak)** | STS AssumeRoleWithWebIdentity | 0 (not yet translated) |
-| **Kafka broker** | S3/SNS bucket notifications | 0 (not yet translated) |
+| **Kafka broker** | S3/SNS bucket notifications to Kafka;  built with `has_kafka` | 0 |
 | **Virtual-host DNS** | Virtual-hosted bucket URLs | 0 (not yet translated) |
 | **Bucket logging rollover** | Bucket logging flush/ACL/auth tests | 3 |
 | **Bucket logging** | Bucket logging tests | 1 |
