@@ -18,7 +18,7 @@ Targets Ceph RGW (and any S3-compatible endpoint) using the Rust-native AWS SDK.
 | `test_s3` | 751 | `test_s3.py`, `test_headers.py`, `rgw_multi/tests.py` |
 | `test_iam` | 75 | `test_iam.py`, `test_sts.py`, plus new account coverage |
 | `test_rgw` | 81 | original to this project, except `quota.rs` from `s3_user_quota.pl` |
-| `test_sns` | 35 | `test_sns.py`;  the HTTP subset of `test_bn.py`;  Kafka scenarios derived from it;  four original event-record tests |
+| `test_sns` | 36 | `test_sns.py`;  the HTTP subset of `test_bn.py`;  Kafka scenarios derived from it;  five original event-record tests |
 | `test_bench` | 7 | original — `elbencho` automation |
 | `test_corpus` | 12 | original — see `tests/test_corpus/README.md` |
 
