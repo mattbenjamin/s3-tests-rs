@@ -2128,6 +2128,35 @@ mod topic_config_tests {
         sns.delete_topic().topic_arn(&arn).send().await.unwrap();
     }
 
+    /* a user name and a password are a pair, whichever of the URL and the
+     * attributes gives each;  half of one is refused, and the gateway
+     * keeps answering (radosgw asserted on it) */
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_topic_credentials_are_a_pair() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        let still_up = || async {
+            sns.list_topics().send().await.expect("the gateway stopped answering");
+        };
+        for attrs in [&[("push-endpoint", KAFKA_ENDPOINT), ("password", "x")][..],
+                      &[("push-endpoint", KAFKA_ENDPOINT), ("user-name", "u")][..],
+                      &[("push-endpoint", "kafka://u:p@127.0.0.1:9092"), ("user-name", "")][..]] {
+            let m = create(&sns, attrs).await
+                .expect_err(&format!("a topic with half a credential was created:  {attrs:?}"));
+            assert!(m.contains("together"), "{attrs:?}:  refused for another reason:  {m}");
+            still_up().await;
+        }
+        let arn = create(&sns, &[("push-endpoint", KAFKA_ENDPOINT)]).await.unwrap();
+        let e = sns.set_topic_attributes().topic_arn(&arn)
+            .attribute_name("password").attribute_value("x").send().await
+            .expect_err("SetTopicAttributes stored a password with no user");
+        let m = e.into_service_error().message().unwrap_or_default().to_string();
+        assert!(m.contains("together"), "{m}");
+        still_up().await;
+        sns.delete_topic().topic_arn(&arn).send().await.unwrap();
+    }
+
     #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
     #[tokio::test]
     async fn test_topic_endpoint_args_escaped() {
