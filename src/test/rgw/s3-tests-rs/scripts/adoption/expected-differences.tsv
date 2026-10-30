@@ -20,7 +20,8 @@
 #             the events the `notify` step captured from NooBaa against
 #             those it captured from RGW after `adopt`;  a difference no
 #             row accounts for is one a consumer of NooBaa's
-#             notifications would meet.
+#             notifications would meet.  noobaa:rgw-notify-kafka is the
+#             same through the Kafka half, when the stand-up has a broker.
 #   when      the modality this row applies in -- md5-off, md5-on, or
 #             blank for both.  A modality is a property of the tree,
 #             fixed when NooBaa wrote its objects, so the two are two
@@ -226,3 +227,29 @@ noobaa:rgw-notify		manifest	event plain ObjectTagging	s3.object.eTag	appears	Noo
 noobaa:rgw-notify		manifest	event plain ObjectTagging	s3.object.size	appears	and the size
 noobaa:rgw-notify	md5-off	manifest	event *	s3.object.eTag	differs	each side's own write of the same content, at different times:  without MD5 an ETag is an mtime-and-inode token
 noobaa:rgw-notify	md5-on	manifest	event *	s3.object.eTag	equal	a guard:  with MD5 the same content has the same ETag on both
+# ---- notification events through Kafka:  noobaa:rgw-notify-kafka ----
+# the same writes, through notify-kafka;  the record is the one HTTP
+# carries, so the rows are the HTTP pair's until a run shows otherwise
+noobaa:rgw-notify-kafka		manifest	event * ObjectCreated	s3.object.size	appears	NooBaa defect:  only a bucket's first notification carries the size -- s3_bucket_logging.js composes a record per notification, and compose_notification_req() deletes res.size_for_notif after reading it (notifications_util.js:491, 08d063f86);  the Kafka notification is the bucket's second.  RGW sends the size on every one
+noobaa:rgw-notify-kafka		manifest	event copy ObjectRemoved	*	appears	NooBaa sends no event for DeleteObjects:  its OP_TO_EVENT has no delete_objects (notifications_util.js, 08d063f86);  RGW sends one ObjectRemoved:Delete per key, as AWS does
+noobaa:rgw-notify-kafka		manifest	event mpu ObjectRemoved	*	appears	same:  the multi-object delete's second key
+noobaa:rgw-notify-kafka		manifest	event *	eventVersion	differs	NooBaa labels 2.3, RGW 2.2:  open, left to others (DECISIONS 2026-10-29)
+noobaa:rgw-notify-kafka		manifest	event *	eventSource	differs	each names its own service:  NooBaa <system>:s3, RGW ceph:s3
+noobaa:rgw-notify-kafka		manifest	event *	userIdentity.principalId	differs	NooBaa names the account, RGW its account id, as RGW names every principal
+noobaa:rgw-notify-kafka		manifest	event *	s3.bucket.ownerIdentity.principalId	differs	same:  the owner by name against by id
+noobaa:rgw-notify-kafka		manifest	event *	requestParameters.sourceIPAddress	recognize:ip-address	the same client:  NooBaa's dual-stack socket reports it IPv4-mapped (::ffff:)
+noobaa:rgw-notify-kafka		manifest	event *	awsRegion	appears	RGW's record carries the zonegroup;  NooBaa's has no such field
+noobaa:rgw-notify-kafka		manifest	event *	eventId	appears	RGW's record carries an event id;  NooBaa's has none
+noobaa:rgw-notify-kafka		manifest	event *	opaqueData	appears	RGW's record carries the topic's opaque data, empty when it has none
+noobaa:rgw-notify-kafka		manifest	event *	s3.bucket.id	appears	an RGW field, empty on nsfs;  NooBaa's absence of it does not matter (Matt, 2026-10-29)
+noobaa:rgw-notify-kafka		manifest	event *	s3.configurationId	appears	a NooBaa defect:  it sets configurationId from notif_conf.name, and the stored configuration holds id, so it is never set;  RGW sends the configuration's Id
+noobaa:rgw-notify-kafka		manifest	event *	s3.object.versionId	appears	RGW sends an empty versionId in an unversioned bucket;  AWS sends null or nothing
+noobaa:rgw-notify-kafka		manifest	event *	s3.object.metadata*	appears	RGW's record carries the object's user metadata;  NooBaa's carries none
+noobaa:rgw-notify-kafka		manifest	event plain ObjectTagging	s3.object.tags*	appears	RGW's record carries the object's tags;  NooBaa's carries none
+noobaa:rgw-notify-kafka		manifest	event copy ObjectCreated	s3.object.eTag	appears	NooBaa leaves the ETag out of a copy's event:  it reads the ETag header, and a copy returns its ETag in the body
+noobaa:rgw-notify-kafka		manifest	event meta ObjectRemoved	s3.object.eTag	appears	NooBaa leaves the ETag out of a delete's event
+noobaa:rgw-notify-kafka		manifest	event meta ObjectRemoved	s3.object.size	appears	and the size
+noobaa:rgw-notify-kafka		manifest	event plain ObjectTagging	s3.object.eTag	appears	NooBaa leaves the ETag out of a tagging event
+noobaa:rgw-notify-kafka		manifest	event plain ObjectTagging	s3.object.size	appears	and the size
+noobaa:rgw-notify-kafka	md5-off	manifest	event *	s3.object.eTag	differs	each side's own write of the same content, at different times:  without MD5 an ETag is an mtime-and-inode token
+noobaa:rgw-notify-kafka	md5-on	manifest	event *	s3.object.eTag	equal	a guard:  with MD5 the same content has the same ETag on both
