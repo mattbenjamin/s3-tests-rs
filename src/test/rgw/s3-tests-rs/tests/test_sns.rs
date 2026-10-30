@@ -2795,5 +2795,14 @@ mod http_event_types {
         assert!(https_delivers(&[("ca-location", &ca), ("ssl-certificate-location", &cert),
                                  ("ssl-key-location", &key)], &receiver).await,
                 "not delivered with a client certificate");
+
+        /* the client certificate does not depend on verifying the
+         * server:  NooBaa's rejectUnauthorized: false with local_file_cert
+         * and local_file_key */
+        assert!(!https_delivers(&[("verify-ssl", "false")], &receiver).await,
+                "delivered without a client certificate, the server unverified");
+        assert!(https_delivers(&[("verify-ssl", "false"), ("ssl-certificate-location", &cert),
+                                 ("ssl-key-location", &key)], &receiver).await,
+                "not delivered with a client certificate, the server unverified");
     }
 }
