@@ -2758,6 +2758,57 @@ mod http_event_types {
         s3.delete_bucket().bucket(&bucket).send().await.unwrap();
     }
 
+    /* s3:ObjectRetention:Put, as AWS sends it:  the event when
+     * PutObjectRetention sets an object's retention, its record
+     * carrying objectRetentionEventData with the mode and retain-until
+     * date the request set (DECISIONS 2026-10-29).  A creation sends
+     * nothing to a retention-only configuration. */
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_object_retention_http() {
+        use aws_sdk_s3::types::{ObjectLockRetention, ObjectLockRetentionMode};
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let (sns, s3) = (get_sns_root_client(), get_iam_root_s3client());
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).object_lock_enabled_for_bucket(true)
+            .send().await.unwrap();
+        let receiver = HttpReceiver::start().await;
+        let topic_arn = notify_on(&sns, &s3, &bucket, &receiver,
+            vec![Event::from("s3:ObjectRetention:Put")]).await;
+
+        let put = s3.put_object().bucket(&bucket).key("retained")
+            .body(ByteStream::from_static(b"retained body")).send().await.unwrap();
+        let version = put.version_id().unwrap().to_string();
+        settle().await;
+        assert!(receiver.take().is_empty(), "a creation sent an event to a retention-only configuration");
+
+        let until = chrono::Utc::now() + chrono::Duration::days(1);
+        s3.put_object_retention().bucket(&bucket).key("retained")
+            .retention(ObjectLockRetention::builder()
+                .mode(ObjectLockRetentionMode::Governance)
+                .retain_until_date(aws_smithy_types::DateTime::from_secs(until.timestamp()))
+                .build())
+            .send().await.unwrap();
+        settle().await;
+        let got = records(&receiver.take());
+        assert_eq!(got.len(), 1, "a retention change:  {got:?}");
+        assert_eq!(got[0]["eventName"], "ObjectRetention:Put");
+        assert_eq!(got[0]["s3"]["object"]["key"], "retained");
+        let data = &got[0]["objectRetentionEventData"];
+        assert_eq!(data["mode"], "GOVERNANCE", "{data}");
+        let date = data["retainUntilDate"].as_str()
+            .unwrap_or_else(|| panic!("no retainUntilDate:  {data}"));
+        let parsed = chrono::DateTime::parse_from_rfc3339(date)
+            .unwrap_or_else(|e| panic!("retainUntilDate {date}:  {e}"));
+        assert_eq!(parsed.timestamp(), until.timestamp(), "{date}");
+        assert!(data.get("eventHold").is_none(), "RGW has no event holds:  {data}");
+
+        s3.delete_object().bucket(&bucket).key("retained").version_id(&version)
+            .bypass_governance_retention(true).send().await.unwrap();
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
     /* HTTPS to a receiver under a CA of its own:  the topic's ca-location
      * names that CA, and with mTLS its ssl-certificate-location and
      * ssl-key-location the client certificate.  Each case also delivers
