@@ -78,8 +78,11 @@ enum Suite {
      * cell's `--with-kafka` started, which is stopped after them */
     Kafka,
     /* `standup.rs conversion`, which starts its own gateway;  `adopt_by`
-     * is its setting of that name:  command, automatic or promotion */
-    Conversion { impersonate: bool, access_model: &'static str, adopt_by: &'static str },
+     * is its setting of that name:  command, automatic or promotion;
+     * `kafka` starts kafka-vstart.sh's broker for the `notify` steps'
+     * Kafka half, and stops it after */
+    Conversion { impersonate: bool, access_model: &'static str, adopt_by: &'static str,
+                 kafka: bool },
 }
 
 struct Cell {
@@ -123,15 +126,15 @@ const CELLS: &[Cell] = &[
      * access model */
     Cell { name: "conversion", user_identity_override: false, vstart: &[],
            suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
-                                       adopt_by: "command" }],
+                                       adopt_by: "command", kafka: false }],
            by_default: false },
     Cell { name: "conversion-posix-strict", user_identity_override: false, vstart: &[],
            suites: &[Suite::Conversion { impersonate: true, access_model: "posix-strict",
-                                       adopt_by: "command" }],
+                                       adopt_by: "command", kafka: false }],
            by_default: false },
     Cell { name: "conversion-s3-native", user_identity_override: false, vstart: &[],
            suites: &[Suite::Conversion { impersonate: true, access_model: "s3-native",
-                                       adopt_by: "command" }],
+                                       adopt_by: "command", kafka: false }],
            by_default: false },
     /* the same tree adopted by the queue, not the commands:  RGW
      * restarted in automatic mode, and the import's gateway switched to
@@ -144,13 +147,21 @@ const CELLS: &[Cell] = &[
            vstart: &["--store", "nsfs", "--clean", "--with-kafka", "-o", KAFKA_CONFIG_KEYS],
            suites: &[Suite::Kafka],
            by_default: false },
+    /* `conversion` with a Kafka half in the `notify` steps:  a NooBaa
+     * Kafka connection, carried across by the import as a topic with
+     * its librdkafka settings, compared as `noobaa:rgw-notify-kafka`.
+     * Off by default, since the broker needs podman */
+    Cell { name: "conversion-kafka", user_identity_override: false, vstart: &[],
+           suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
+                                       adopt_by: "command", kafka: true }],
+           by_default: false },
     Cell { name: "conversion-automatic", user_identity_override: false, vstart: &[],
            suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
-                                       adopt_by: "automatic" }],
+                                       adopt_by: "automatic", kafka: false }],
            by_default: false },
     Cell { name: "conversion-promotion", user_identity_override: false, vstart: &[],
            suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
-                                       adopt_by: "promotion" }],
+                                       adopt_by: "promotion", kafka: false }],
            by_default: false },
     /* the same six with rgw_nsfs_user_identity_override on:  an
      * account user's own row overrides its account's, as NooBaa serves
@@ -177,15 +188,15 @@ const CELLS: &[Cell] = &[
            by_default: true },
     Cell { name: "conversion-override", user_identity_override: true, vstart: &[],
            suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
-                                       adopt_by: "command" }],
+                                       adopt_by: "command", kafka: false }],
            by_default: false },
     Cell { name: "conversion-posix-strict-override", user_identity_override: true, vstart: &[],
            suites: &[Suite::Conversion { impersonate: true, access_model: "posix-strict",
-                                       adopt_by: "command" }],
+                                       adopt_by: "command", kafka: false }],
            by_default: false },
     Cell { name: "conversion-s3-native-override", user_identity_override: true, vstart: &[],
            suites: &[Suite::Conversion { impersonate: true, access_model: "s3-native",
-                                       adopt_by: "command" }],
+                                       adopt_by: "command", kafka: false }],
            by_default: false },
 ];
 
@@ -397,7 +408,7 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
                     | Suite::Kafka
                         if o.test.is_some() => {}
                     Suite::Librgw if !o.librgw => {}
-                    Suite::Conversion { impersonate, access_model, adopt_by } => {
+                    Suite::Conversion { impersonate, access_model, adopt_by, kafka } => {
                         /* conversion raises CAP_DAC_OVERRIDE and CAP_CHOWN
                          * whether or not it impersonates, and an unimpersonated
                          * vstart sets no caps */
@@ -426,7 +437,17 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
                         st.env.push(("ADOPTION_ADOPT_BY".into(), adopt_by.to_string()));
                         st.env.push(("ADOPTION_USER_IDENTITY_OVERRIDE".into(),
                                      c.user_identity_override.to_string()));
+                        let broker = o.source_dir.join("src/script/rgw/kafka-vstart.sh")
+                            .to_string_lossy().into_owned();
+                        if *kafka {
+                            st.env.push(("ADOPTION_KAFKA_BROKER".into(), "127.0.0.1:9092".into()));
+                            steps.push(step(&cell, "kafka-start", b, vec![broker.clone()]));
+                        }
                         steps.push(st);
+                        if *kafka {
+                            /* run whatever the stand-up returned */
+                            steps.push(step(&cell, "kafka-stop", b, vec![broker, "--stop".into()]));
+                        }
                     }
                     Suite::Profile(p) => {
                         let mut st = step(&cell, p, suite_dir, s(&["cargo", "nextest", "run",

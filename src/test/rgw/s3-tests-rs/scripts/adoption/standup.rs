@@ -67,6 +67,9 @@ struct Env {
     rgw_port: u16,
     /// where `notify` listens for both gateways' notifications
     notify_port: u16,
+    /// the broker `notify`'s Kafka half produces to, `kafka-vstart.sh`'s
+    /// sidecar;  unset, `notify` has no Kafka half
+    kafka_broker: Option<String>,
     /// NooBaa's IAM port.  HTTPS only -- their IAM listener has no
     /// HTTP form -- with the self-signed certificate they generate
     /// when the config root holds none
@@ -228,6 +231,7 @@ impl Env {
             port: get("port", "6001").parse().unwrap_or(6001),
             rgw_port: get("rgw_port", "8000").parse().unwrap_or(8000),
             notify_port: get("notify_port", "9101").parse().unwrap_or(9101),
+            kafka_broker: s.get("kafka_broker").filter(|v| !v.is_empty()).cloned(),
             iam_port: get("iam_port", "7005").parse().unwrap_or(7005),
             sts_port: get("sts_port", "7443").parse().unwrap_or(7443),
             account: get("account", "adoption"),
@@ -471,6 +475,7 @@ fn list() {
         ("sts_port", "the NooBaa STS port, HTTPS;  default 7443"),
         ("rgw_port", "the port RGW serves on after `adopt`"),
         ("notify_port", "where `notify` listens for notifications;  default 9101"),
+        ("kafka_broker", "a Kafka half for `notify`, through kafka-vstart.sh's broker;  default none"),
         ("account", "the account `config` creates;  default adoption"),
         ("role", "the role `config` gives the account;  default adoption-role"),
         ("iam_user", "the IAM user `iam-user` creates;  default adoption-iam-user"),
@@ -2953,9 +2958,10 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
     } else {
     println!("         rgw-vstart.sh --store nsfs --data-root {} \
               --noobaa-config-root {} --adoption-mode command --with-lifecycle \
-              -o rgw_notification_bucket_arn_region=false {} {}",
+              -o rgw_notification_bucket_arn_region=false {} {} {}",
              env.data.display(), env.config_root().display(),
-             rgw_etag_opts(env).join(" "), rgw_identity_opts(env).join(" "));
+             rgw_etag_opts(env).join(" "), rgw_identity_opts(env).join(" "),
+             rgw_notify_opts(env).join(" "));
     let st = Command::new("bash")
         .arg(script.display().to_string())
         .args([
@@ -2978,6 +2984,7 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
         ])
         .args(rgw_etag_opts(env))
         .args(rgw_identity_opts(env))
+        .args(rgw_notify_opts(env))
         .current_dir(build)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -3366,6 +3373,55 @@ fn notify_log_dir(env: &Env) -> PathBuf {
 const NOTIFY_BUCKET: &str = "notify";
 /// The connection NooBaa's notification names, and RGW's topic.
 const NOTIFY_TOPIC: &str = "notify";
+/// The Kafka half's connection and Kafka topic, and so RGW's topic,
+/// which is named after the Kafka topic
+const NOTIFY_KAFKA: &str = "notify-kafka";
+/// The consumer group both captures read with:  committed by the first,
+/// so the second reads only what arrived after it
+const NOTIFY_KAFKA_GROUP: &str = "standup-notify";
+/// `kafka-vstart.sh`'s container, which holds the console consumer
+const KAFKA_CONTAINER: &str = "kafka-vstart";
+
+/// What arrived on the Kafka half's topic since the last capture:
+/// each message a notification body, one per line.
+fn notify_kafka_capture(broker: &str) -> Result<Vec<serde_json::Value>, String> {
+    let out = Command::new("podman")
+        .args(["exec", KAFKA_CONTAINER, "/opt/kafka/bin/kafka-console-consumer.sh",
+               "--bootstrap-server", broker, "--topic", NOTIFY_KAFKA,
+               "--group", NOTIFY_KAFKA_GROUP, "--from-beginning", "--timeout-ms", "10000"])
+        .output()
+        .map_err(|e| format!("notify:  cannot run the Kafka console consumer: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut bodies = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        bodies.push(serde_json::from_str(line)
+            .map_err(|e| format!("notify:  a Kafka message that is not JSON ({e}): {line}"))?);
+    }
+    Ok(bodies)
+}
+
+/// The event records in `posts`, without NooBaa's TestEvent, which it
+/// sends when the notification is configured and which is {Bucket,
+/// Event, ...} with no eventName.
+fn notify_records(posts: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    posts.iter()
+        .flat_map(|p| p["Records"].as_array().cloned().unwrap_or_default())
+        .filter(|r| r.get("eventName").is_some())
+        .collect()
+}
+
+/// `records` as the capture `notify-<side>` or `notify-kafka-<side>`.
+fn notify_write_capture(env: &Env, name: &str, records: &[serde_json::Value])
+                        -> Result<(), String> {
+    let dir = env.capture_dir(name);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    std::fs::write(dir.join("notify.manifest"), notify_manifest(records))
+        .map_err(|e| format!("cannot write {}: {e}", dir.display()))?;
+    std::fs::write(dir.join("notify.json"), serde_json::Value::from(records.to_vec()).to_string())
+        .map_err(|e| format!("cannot write {}: {e}", dir.display()))?;
+    println!("notify   {name}:  {} events captured in {}", records.len(), dir.display());
+    Ok(())
+}
 
 /// What one gateway sent:  every POST's body, in the order received.
 #[derive(Clone, Default)]
@@ -3535,11 +3591,12 @@ fn notify_writes(who: &str, base: &str) -> Result<(), String> {
 }
 
 /// The bucket's notification on `topic`, for creates, removes and tags.
-fn notify_configure(who: &str, base: &str, topic: &str) -> Result<(), String> {
-    let conf = format!("<NotificationConfiguration><TopicConfiguration><Id>{NOTIFY_TOPIC}</Id>\
-        <Topic>{topic}</Topic><Event>s3:ObjectCreated:*</Event>\
-        <Event>s3:ObjectRemoved:*</Event><Event>s3:ObjectTagging:*</Event>\
-        </TopicConfiguration></NotificationConfiguration>");
+fn notify_configure(who: &str, base: &str, topics: &[(&str, &str)]) -> Result<(), String> {
+    let conf = format!("<NotificationConfiguration>{}</NotificationConfiguration>",
+        topics.iter().map(|(id, topic)| format!("<TopicConfiguration><Id>{id}</Id>\
+            <Topic>{topic}</Topic><Event>s3:ObjectCreated:*</Event>\
+            <Event>s3:ObjectRemoved:*</Event><Event>s3:ObjectTagging:*</Event>\
+            </TopicConfiguration>")).collect::<String>());
     let (status, body, _) = s3_call(who, "PUT", &format!("{base}/{NOTIFY_BUCKET}?notification"),
                                     &[], Some(&conf))?;
     if !(200..300).contains(&status) {
@@ -3663,6 +3720,16 @@ fn notify_step(env: &Env) -> Result<(), String> {
                         "--notification_protocol", "http",
                         "--request_options_object", &opts])?;
         println!("notify   connection {NOTIFY_TOPIC:?} to {endpoint}");
+        if let Some(broker) = &env.kafka_broker {
+            /* client.id, so the import's kafka-config is exercised */
+            let kopts = serde_json::json!({"metadata.broker.list": broker,
+                                           "client.id": "noobaa-notify"}).to_string();
+            let _ = nsfs_cli(env, &["connection", "delete", "--name", NOTIFY_KAFKA]);
+            nsfs_cli(env, &["connection", "add", "--name", NOTIFY_KAFKA,
+                            "--notification_protocol", "kafka", "--topic", NOTIFY_KAFKA,
+                            "--kafka_options_object", &kopts])?;
+            println!("notify   connection {NOTIFY_KAFKA:?} to Kafka {broker}");
+        }
         let (status, body, _) = s3_call(&who, "PUT", &format!("{base}/{NOTIFY_BUCKET}"), &[], None)?;
         /* a rerun finds it, and NooBaa says so either way */
         if !(200..300).contains(&status) && !body.contains("BucketAlreadyOwnedByYou")
@@ -3680,12 +3747,18 @@ fn notify_step(env: &Env) -> Result<(), String> {
         let arn = xml_tag(&body, "Topic").filter(|_| status == 200)
             .ok_or_else(|| format!("notify:  the import carried no notification on \
                 {NOTIFY_BUCKET} ({status}):\n{body}"))?;
-        println!("notify   imported topic {arn}, connection {NOTIFY_TOPIC:?} to {endpoint}");
+        for t in body.split("<Topic>").skip(1).filter_map(|r| r.split("</Topic>").next()) {
+            println!("notify   imported topic {t}");
+        }
         arn
     };
     let base = format!("http://127.0.0.1:{}", if noobaa { env.port } else { env.rgw_port });
     if noobaa {
-        notify_configure(&who, &base, &topic)?;
+        let mut topics = vec![(NOTIFY_TOPIC, topic.as_str())];
+        if env.kafka_broker.is_some() {
+            topics.push((NOTIFY_KAFKA, NOTIFY_KAFKA));
+        }
+        notify_configure(&who, &base, &topics)?;
     }
     notify_writes(&who, &base)?;
     if noobaa {
@@ -3694,22 +3767,19 @@ fn notify_step(env: &Env) -> Result<(), String> {
     std::thread::sleep(std::time::Duration::from_secs(2));
 
     let posts = got.0.lock().unwrap().clone();
-    let records: Vec<serde_json::Value> = posts.iter()
-        .flat_map(|p| p["Records"].as_array().cloned().unwrap_or_default())
-        /* NooBaa's TestEvent, sent when the notification is configured,
-         * is {Bucket, Event, ...} with no eventName */
-        .filter(|r| r.get("eventName").is_some())
-        .collect();
+    let records = notify_records(&posts);
     if records.is_empty() {
         return Err(format!("notify:  {side} sent no event for the writes ({} POSTs)", posts.len()));
     }
-    let dir = env.capture_dir(&format!("notify-{side}"));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    std::fs::write(dir.join("notify.manifest"), notify_manifest(&records))
-        .map_err(|e| format!("cannot write {}: {e}", dir.display()))?;
-    std::fs::write(dir.join("notify.json"), serde_json::Value::from(records.clone()).to_string())
-        .map_err(|e| format!("cannot write {}: {e}", dir.display()))?;
-    println!("notify   {side}:  {} events captured in {}", records.len(), dir.display());
+    notify_write_capture(env, &format!("notify-{side}"), &records)?;
+
+    if let Some(broker) = &env.kafka_broker {
+        let records = notify_records(&notify_kafka_capture(broker)?);
+        if records.is_empty() {
+            return Err(format!("notify:  {side} sent no event to Kafka topic {NOTIFY_KAFKA}"));
+        }
+        notify_write_capture(env, &format!("notify-kafka-{side}"), &records)?;
+    }
     Ok(())
 }
 
@@ -4017,6 +4087,20 @@ fn nsfs_cli(env: &Env, args: &[&str]) -> Result<String, String> {
 /// Under `impersonate`:  serve impersonating, under the access model,
 /// with vstart's users and capabilities but not its fixture, which
 /// would write into the tree NooBaa wrote.
+/// The librdkafka key `notify`'s Kafka connection sets, listed so the
+/// topic the import makes of it delivers (DECISIONS 2026-10-30);  and
+/// `--with-kafka`, since rgw-vstart.sh stops every sidecar container
+/// when it starts a gateway, and this restarts the broker after it.
+/// NooBaa's half is captured by then, and RGW's reads the new broker's
+/// topic, which holds only RGW's events.
+fn rgw_notify_opts(env: &Env) -> Vec<String> {
+    match env.kafka_broker {
+        Some(_) => vec!["--with-kafka".into(),
+                        "-o".into(), "rgw_kafka_config_allowed_keys=client.id".into()],
+        None => Vec::new(),
+    }
+}
+
 fn rgw_identity_opts(env: &Env) -> Vec<String> {
     let mut opts: Vec<String> = Vec::new();
     if env.impersonate {

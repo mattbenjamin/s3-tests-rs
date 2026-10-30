@@ -12,7 +12,9 @@
 //! events the `notify` step captured from each gateway, `notify-noobaa/`
 //! against `notify-rgw/`, where a difference no row accounts for is one
 //! a consumer of NooBaa's notifications would meet;  it is skipped where
-//! neither was captured.  The rules are `s3_tests_rs::corpus::compare`.
+//! neither was captured.  A fourth, `noobaa:rgw-notify-kafka`, is the same
+//! for the Kafka half, `notify-kafka-noobaa/` against `notify-kafka-rgw/`,
+//! captured only when the stand-up has a broker.  The rules are `s3_tests_rs::corpus::compare`.
 //!
 //! Exits 1 if any difference is unexpected or breaks its row's class, 3
 //! if the only failures are known defects (`known` rows), 2 if the
@@ -28,10 +30,11 @@ use std::process::ExitCode;
 use s3_tests_rs::corpus::compare::{differences, evaluate, parse_rows, Capture, Class,
                                    Difference, Outcome};
 
-const PAIRS: [(&str, &str, &str, &str); 3] = [
+const PAIRS: [(&str, &str, &str, &str); 4] = [
     ("noobaa:unadopted", "adoption", "noobaa", "rgw-unadopted"),
     ("unadopted:converted", "conversion", "rgw-unadopted", "rgw-converted"),
     ("noobaa:rgw-notify", "notification", "notify-noobaa", "notify-rgw"),
+    ("noobaa:rgw-notify-kafka", "notification-kafka", "notify-kafka-noobaa", "notify-kafka-rgw"),
 ];
 
 fn show(v: &Option<std::collections::BTreeSet<String>>) -> String {
@@ -68,7 +71,7 @@ fn main() -> ExitCode {
     let mut known_only = false;
     let mut used: BTreeMap<usize, usize> = BTreeMap::new();
     for (pair, kind, l, r) in PAIRS {
-        if kind == "notification" && !Path::new(root).join(l).exists()
+        if kind.starts_with("notification") && !Path::new(root).join(l).exists()
             && !Path::new(root).join(r).exists() {
             continue;
         }
