@@ -51,7 +51,7 @@ for the semantics it gives.  Its dimensions:
 | user identity override | off, on | `--user-identity-override` |
 
 Three fresh setups and three adopted ones, each with the override off
-and on, make twelve deployments:
+and on, make twelve deployments;  four more follow the table:
 
 | deployment | started as | runs |
 |---|---|---|
@@ -63,8 +63,15 @@ and on, make twelve deployments:
 | `conversion-s3-native` | the stand-up, impersonated, `s3-native` | the same |
 | each with `-override` | the same, with `--user-identity-override` | the same;  tests that resolve an account user expect its own row |
 
-The deployments other than `plain` run with the default bucket
-profile, `shared`.
+| deployment | started as | runs |
+|---|---|---|
+| `conversion-automatic` | the stand-up, restarted in `automatic` after `import` | the adoption corpus, adopted by `automatic`'s queue |
+| `conversion-promotion` | the stand-up, switched to `automatic` by the `adoption` hint | the adoption corpus, and the promotion checks |
+| `kafka` | not impersonated, `--with-kafka` | `test_sns` built with `has_kafka`, against the broker it starts;  needs podman |
+| `conversion-kafka` | the stand-up, with `kafka-vstart.sh`'s broker | the adoption corpus, and the `notify` steps' Kafka half;  needs podman |
+
+The four run only when `--cells` names them.  The deployments other
+than `plain` run with the default bucket profile, `shared`.
 
 ### 2.  Switches tested inside a deployment
 
@@ -179,7 +186,7 @@ native addon.
 
 ```bash
 ./scripts/validate.rs \
-  --cells posix-strict,s3-native,plain,posix-strict-override,s3-native-override,plain-override,conversion,conversion-posix-strict,conversion-s3-native,conversion-override,conversion-posix-strict-override,conversion-s3-native-override
+  --cells posix-strict,s3-native,plain,posix-strict-override,s3-native-override,plain-override,conversion,conversion-posix-strict,conversion-s3-native,conversion-override,conversion-posix-strict-override,conversion-s3-native-override,conversion-automatic,conversion-promotion,kafka,conversion-kafka
 ```
 
 That is the run that says a change is done.  **With no `--cells` you
@@ -192,7 +199,7 @@ default run says nothing about adoption.
 | to | run |
 |---|---|
 | check a driver change quickly | no `--cells`:  the unit suite and the six fresh deployments |
-| run the adoption matrix alone | `--no-unit --cells conversion,conversion-posix-strict,conversion-s3-native,conversion-override,conversion-posix-strict-override,conversion-s3-native-override` |
+| run the adoption matrix alone | `--no-unit --cells conversion,conversion-posix-strict,conversion-s3-native,conversion-override,conversion-posix-strict-override,conversion-s3-native-override,conversion-automatic,conversion-promotion,conversion-kafka` |
 | repeat one deployment | `--cells posix-strict` |
 | re-run without rebuilding | add `--no-build`;  the binaries in `--build` are used as they are |
 | run one test in every deployment that has it | `--test 'test(=module::test_name)'`, which replaces each deployment's profiles with that filter |
@@ -218,15 +225,14 @@ the build tree as it finds them at each step.
 ## The adoption matrix, and reading its result
 
 Adoption is RGW serving a tree NooBaa wrote.  The adoption matrix is
-the six conversion deployments.  Each runs
+the nine conversion deployments.  Each runs
 `scripts/adoption/standup.rs conversion` from a fresh work directory:
 NooBaa writes a tree, the conversion corpus captures it three times,
-and the captures are compared.  `scripts/adoption/WORKFLOW.md` is the
-sequence of steps, and `scripts/adoption/README.md` the stand-up
-itself.
+and the captures are compared.  `scripts/adoption/README.md`
+describes the stand-up, and its steps in sequence.
 
-The six differ in how RGW is started over the tree, and so in what
-they show:
+The nine differ in how RGW is started over the tree, or in what adopts
+it, and so in what they show:
 
 | deployment | RGW is started | what it adds |
 |---|---|---|
@@ -234,17 +240,27 @@ they show:
 | `conversion-posix-strict` | impersonated, `posix-strict` | that the adopted tree is served as its owners, as NooBaa serves it;  the `groups`, `nsswitch` and `copy` steps run |
 | `conversion-s3-native` | impersonated, `s3-native` | the same under the other access model |
 | each with `-override` | as above, `--user-identity-override` | an IAM user NooBaa serves from its own copy is served the same;  `copy rgw` expects the user's own row instead of the account's |
+| `conversion-automatic` | as `conversion`;  `adopt` restarts it in `automatic` | that the queue adopts the whole store from startup, fails the damaged record, and observes completion after its abandonment |
+| `conversion-promotion` | as `conversion`;  `adopt` switches it to `automatic` with one worker | the request path:  a held bucket's read served as found, its write 503, the promoted bucket taken next |
+| `conversion-kafka` | as `conversion`, with a Kafka broker | NooBaa's Kafka connection carried across as a topic, its events compared with RGW's |
 
-**Three captures, two comparisons.**  The corpus runs against NooBaa
-(`capture/noobaa`), against RGW after `import` with every bucket still
-in NooBaa's format (`rgw-unadopted`), and after `adopt` has converted
-them (`rgw-converted`).  `compare` holds two pairs:
+**Four captures, and a comparison for each pair.**  The corpus runs
+against NooBaa (`capture/noobaa`), against RGW after `import` with
+every bucket still in NooBaa's format (`rgw-unadopted`), and after
+`adopt` has converted them (`rgw-converted`);  the `notify` steps
+capture the events each gateway sends for the same writes
+(`notify-noobaa`, `notify-rgw`, and `notify-kafka-*` in
+`conversion-kafka`).  `compare` holds:
 
 - `noobaa:unadopted` -- what RGW serves from NooBaa's tree before
   touching it.  A difference nothing accounts for is an **adoption
   defect**.
 - `unadopted:converted` -- what conversion changed.  A difference
   nothing accounts for is a **conversion defect**.
+- `noobaa:rgw-notify`, and `noobaa:rgw-notify-kafka` -- NooBaa's event
+  records against those RGW sends through what the import carried.  A
+  difference nothing accounts for is a defect in the record or in the
+  notification translation.
 
 Each pair prints one line:
 
