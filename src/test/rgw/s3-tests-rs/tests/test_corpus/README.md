@@ -10,8 +10,8 @@ Comparing two captures is a separate step, `corpus-compare`
 
 This file is the interface, and the reasoning behind its shape.  The
 end-to-end validation workflow this feeds — stand NooBaa up, generate
-and ingest, hand off to RGW, verify — is
-`../../scripts/adoption/WORKFLOW.md`.
+and ingest, hand off to RGW, verify — is "The conversion profile, step
+by step" in `../../scripts/adoption/README.md`.
 
 **Why a modality of the suite.**  A declarative spec of what to write
 would need its own completeness argument, with nothing behind it but
