@@ -366,7 +366,7 @@ const STEPS: &[(&str, &str)] = &[
     ("groups", "under impersonation, write through rgwfix as list-less accounts:  NooBaa before `stop`, RGW after `role-rgw`"),
     ("copy", "under impersonation, a user whose account moved after the user was made:  NooBaa before `stop` makes and records it, RGW after `role-rgw` serves it per rgw_nsfs_user_identity_override"),
     ("nsswitch", "write as the nsswitch-resolved account, and check the file is the name's uid's:  NooBaa before `stop`, RGW after `role-rgw`"),
-    ("notify", "the same writes on a bucket with a notification, its events captured:  NooBaa before `stop`, through a connection and `noobaa-cli notification`;  RGW after `adopt`, through its own topic"),
+    ("notify", "the same writes on a bucket with a notification, its events captured:  NooBaa before `stop`, through a connection and `noobaa-cli notification`;  RGW after `adopt`, through the topic and configuration the import carried"),
     ("stop",     "stop the endpoint, leaving the tree"),
     ("damage",   "damage one bucket record, so adoption meets a record it cannot carry"),
     ("import",   "RGW over the same tree;  import the identities, buckets left in NooBaa's format"),
@@ -3671,19 +3671,22 @@ fn notify_step(env: &Env) -> Result<(), String> {
         }
         NOTIFY_TOPIC.to_string()
     } else {
+        /* the import carried NooBaa's notification and its connection
+         * (work plan I10):  the bucket's configuration names the topic
+         * the connection became, and nothing is configured here */
         let base = format!("http://127.0.0.1:{}", env.rgw_port);
-        let form = format!("Action=CreateTopic&Name={NOTIFY_TOPIC}\
-            &Attributes.entry.1.key=push-endpoint&Attributes.entry.1.value={}",
-            endpoint.replace(':', "%3A").replace('/', "%2F"));
-        let (status, body, _) = s3_call(&who, "POST", &format!("{base}/"),
-            &[("Content-Type", "application/x-www-form-urlencoded")], Some(&form))?;
-        let arn = xml_tag(&body, "TopicArn").filter(|_| status == 200)
-            .ok_or_else(|| format!("notify:  CreateTopic returned {status}:\n{body}"))?;
-        println!("notify   topic {arn} to {endpoint}");
+        let (status, body, _) = s3_call(&who, "GET",
+            &format!("{base}/{NOTIFY_BUCKET}?notification"), &[], None)?;
+        let arn = xml_tag(&body, "Topic").filter(|_| status == 200)
+            .ok_or_else(|| format!("notify:  the import carried no notification on \
+                {NOTIFY_BUCKET} ({status}):\n{body}"))?;
+        println!("notify   imported topic {arn}, connection {NOTIFY_TOPIC:?} to {endpoint}");
         arn
     };
     let base = format!("http://127.0.0.1:{}", if noobaa { env.port } else { env.rgw_port });
-    notify_configure(&who, &base, &topic)?;
+    if noobaa {
+        notify_configure(&who, &base, &topic)?;
+    }
     notify_writes(&who, &base)?;
     if noobaa {
         noobaa_deliver_notifications(env)?;
