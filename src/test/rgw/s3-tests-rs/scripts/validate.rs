@@ -60,6 +60,10 @@ const TARGETS: &[&str] = &["radosgw", "radosgw-admin", "ceph-conf",
     "unittest_rgw_nsfs_driver", "ceph_test_librgw_file_write2",
     "ceph_test_librgw_file_nfsns"];
 const FEATURES: &str = "fails_on_nsfs,rgw_admin";
+/* the librdkafka keys test_sns's kafka-config tests set;  the cells
+ * passing it take the tests' accepting case, the others the refusing */
+const KAFKA_CONFIG_KEYS: &str =
+    "rgw_kafka_config_allowed_keys=client.id,linger.ms,message.max.bytes,security.protocol,sasl.password";
 /* vstart's fixed test user, which the librgw suites mount as */
 const AWS_KEY: &str = "0555b35654ad1656d804";
 const AWS_SECRET: &str = "h7GhxuBLTrlhVUyxSPUKUV8r/2EI4ngqJxD7iBdBYLhwluN30JaT3Q==";
@@ -109,7 +113,8 @@ const CELLS: &[Cell] = &[
                      Suite::Profile("role-identity")],
            by_default: true },
     Cell { name: "plain", user_identity_override: false,
-           vstart: &["--store", "nsfs", "--bucket-profile", "strong", "--clean"],
+           vstart: &["--store", "nsfs", "--bucket-profile", "strong", "--clean",
+                     "-o", KAFKA_CONFIG_KEYS],
            suites: &[Suite::Profile("baseline"), Suite::Librgw],
            by_default: true },
     /* the adoption corpus:  NooBaa writes a tree, RGW captures it before
@@ -136,7 +141,7 @@ const CELLS: &[Cell] = &[
      * that builds `has_kafka`.  Off by default, since the sidecar needs
      * podman */
     Cell { name: "kafka", user_identity_override: false,
-           vstart: &["--store", "nsfs", "--clean", "--with-kafka"],
+           vstart: &["--store", "nsfs", "--clean", "--with-kafka", "-o", KAFKA_CONFIG_KEYS],
            suites: &[Suite::Kafka],
            by_default: false },
     Cell { name: "conversion-automatic", user_identity_override: false, vstart: &[],
@@ -166,7 +171,8 @@ const CELLS: &[Cell] = &[
                      Suite::Profile("role-identity")],
            by_default: true },
     Cell { name: "plain-override", user_identity_override: true,
-           vstart: &["--store", "nsfs", "--bucket-profile", "strong", "--clean"],
+           vstart: &["--store", "nsfs", "--bucket-profile", "strong", "--clean",
+                     "-o", KAFKA_CONFIG_KEYS],
            suites: &[Suite::Profile("baseline"), Suite::Librgw],
            by_default: true },
     Cell { name: "conversion-override", user_identity_override: true, vstart: &[],

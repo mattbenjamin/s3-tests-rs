@@ -20,7 +20,15 @@
 //! names:  the five tests whose topics are not persistent, against an
 //! endpoint the test starts in its own process
 //! (`s3_tests_rs::notify_receiver`), so they need nothing started and
-//! run wherever the suite does.
+//! run wherever the suite does.  Two more deliver over HTTPS, to the
+//! receiver under a CA of its own, with and without a client
+//! certificate;  they need the gateway on this host's filesystem.
+//!
+//! `topic_config_tests` are RGW's own:  the endpoint arguments checked
+//! when a topic is created -- `kafka-config` against the gateway's
+//! `rgw_kafka_config_allowed_keys`, the HTTP client certificate, and
+//! the escaping of a stored value.  Each probes whether its keys are
+//! listed and asserts whichever case the gateway is in.
 
 use s3_tests_rs::client::{
     get_iam_root_s3client,
@@ -358,6 +366,69 @@ mod kafka_tests {
         assert_eq!(record["s3"]["bucket"]["name"].as_str().unwrap(), bucket);
 
         nuke_topics(&sns, &get_topic_prefix()).await;
+    }
+
+    /* a topic's kafka-config reaches its producer:  one setting only
+     * the producer acts on delivers, and one that makes the event too
+     * large for the producer does not */
+    #[tokio::test]
+    async fn test_notification_kafka_config() {
+        use super::topic_config_tests::{allowed, create, UNLISTED};
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        let s3 = get_iam_root_s3client();
+        let broker = get_kafka_broker();
+        let endpoint = format!("kafka://{}", broker);
+
+        for (key, value, delivers) in [("client.id", "s3-tests-rs", true),
+                                       ("message.max.bytes", "1000", false)] {
+            let config = serde_json::json!({ key: value }).to_string();
+            if !allowed(&sns, key, value).await {
+                let m = create(&sns, &[("push-endpoint", &endpoint), ("kafka-config", &config)])
+                    .await.expect_err("an unlisted key was accepted");
+                assert!(m.contains(UNLISTED), "{m}");
+                continue;
+            }
+            let topic_name = get_new_bucket_name();
+            let bucket = get_new_bucket_name();
+            let topic_arn = sns.create_topic()
+                .name(&topic_name)
+                .attributes("push-endpoint", &endpoint)
+                .attributes("kafka-ack-level", "broker")
+                .attributes("kafka-config", &config)
+                .send().await.unwrap()
+                .topic_arn().unwrap().to_string();
+            s3.create_bucket().bucket(&bucket).send().await.unwrap();
+            s3.put_bucket_notification_configuration()
+                .bucket(&bucket)
+                .notification_configuration(
+                    aws_sdk_s3::types::NotificationConfiguration::builder()
+                        .topic_configurations(
+                            aws_sdk_s3::types::TopicConfiguration::builder()
+                                .id("kafka-config")
+                                .topic_arn(&topic_arn)
+                                .events(aws_sdk_s3::types::Event::S3ObjectCreated)
+                                .build()
+                                .unwrap(),
+                        )
+                        .build(),
+                )
+                .send().await.unwrap();
+            let consumer = make_consumer(&broker, &topic_name);
+            /* the event carries the metadata, so it is over 1000 bytes */
+            let obj_key = "kafka-config".to_string();
+            s3.put_object().bucket(&bucket).key(&obj_key)
+                .metadata("pad", "p".repeat(1000))
+                .body(ByteStream::from_static(b"kafka-config"))
+                .send().await.unwrap();
+            /* inside wait_for_event()'s own ten seconds, which panic */
+            let got = timeout(Duration::from_secs(8),
+                              wait_for_event(&consumer, &obj_key, "ObjectCreated:")).await;
+            assert_eq!(got.is_ok(), delivers, "{key}={value}");
+            s3.delete_object().bucket(&bucket).key(&obj_key).send().await.unwrap();
+            sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+            s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1799,6 +1870,287 @@ mod kafka_tests {
     }
 }
 
+/* Endpoint arguments a topic stores and checks at creation:  a Kafka
+ * topic's `kafka-config`, the librdkafka settings passed through to its
+ * producer, gated by the gateway's `rgw_kafka_config_allowed_keys`;  the
+ * client certificate an HTTP topic must give whole;  and the escaping
+ * that keeps `%`, `&` and `+` in a stored value.  Creating a topic does
+ * not connect, so these need no broker.  A client cannot read the
+ * gateway's allowlist, so each test first probes with a topic whether
+ * its keys are listed, and asserts whichever case it is in. */
+mod topic_config_tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use aws_sdk_sns::error::ProvideErrorMetadata;
+
+    const KAFKA_ENDPOINT: &str = "kafka://127.0.0.1:9092";
+    pub(super) const UNLISTED: &str = "is not in rgw_kafka_config_allowed_keys";
+
+    /* a topic with `attributes`, its ARN, or the message it is refused with */
+    pub(super) async fn create(sns: &aws_sdk_sns::Client, attributes: &[(&str, &str)])
+                    -> Result<String, String> {
+        let mut req = sns.create_topic().name(get_new_bucket_name());
+        for (k, v) in attributes {
+            req = req.attributes(*k, *v);
+        }
+        match req.send().await {
+            Ok(r) => Ok(r.topic_arn().unwrap().to_string()),
+            Err(e) => Err(e.into_service_error().message().unwrap_or_default().to_string()),
+        }
+    }
+
+    /* whether rgw_kafka_config_allowed_keys lists `key`:  a Kafka topic
+     * setting it alone, to a value librdkafka accepts, is created, or
+     * refused for that reason.  The allowlist is checked first, so a
+     * secret refused for its transport is listed */
+    pub(super) async fn allowed(sns: &aws_sdk_sns::Client, key: &str, value: &str) -> bool {
+        let config = serde_json::json!({ key: value }).to_string();
+        match create(sns, &[("push-endpoint", KAFKA_ENDPOINT), ("kafka-config", &config)]).await {
+            Ok(arn) => {
+                sns.delete_topic().topic_arn(&arn).send().await.unwrap();
+                true
+            }
+            Err(m) if m.contains(UNLISTED) => false,
+            Err(m) if m.contains("secure") => true,
+            Err(m) => panic!("probing {key}={value}:  refused for another reason:  {m}"),
+        }
+    }
+
+    /* the topic's EndPoint attribute, as JSON */
+    async fn endpoint(sns: &aws_sdk_sns::Client, arn: &str) -> serde_json::Value {
+        let attrs = sns.get_topic_attributes().topic_arn(arn).send().await.unwrap();
+        let ep = attrs.attributes().unwrap().get("EndPoint").expect("an EndPoint attribute");
+        serde_json::from_str(ep).expect("EndPoint is JSON")
+    }
+
+    fn percent_decode(s: &str) -> String {
+        let b = s.as_bytes();
+        let mut out = Vec::with_capacity(b.len());
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' && i + 2 < b.len() {
+                out.push(u8::from_str_radix(&s[i + 1..i + 3], 16).expect("a percent escape"));
+                i += 3;
+            } else {
+                out.push(if b[i] == b'+' { b' ' } else { b[i] });
+                i += 1;
+            }
+        }
+        String::from_utf8(out).unwrap()
+    }
+
+    /* EndpointArgs read as the gateway reads them back
+     * (RGWHTTPArgs::parse()):  split on '&', each entry url-decoded, the
+     * name ending at the first '=' */
+    fn endpoint_args(ep: &serde_json::Value) -> HashMap<String, String> {
+        ep["EndpointArgs"].as_str().unwrap_or_default().split('&')
+            .filter(|e| !e.is_empty())
+            .map(|e| {
+                let e = percent_decode(e);
+                match e.split_once('=') {
+                    Some((k, v)) => (k.to_string(), v.to_string()),
+                    None => (e, String::new()),
+                }
+            })
+            .collect()
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_topic_kafka_config_unlisted_key() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        /* refused either way:  unlisted, or, listed, unknown to librdkafka */
+        let m = create(&sns, &[("push-endpoint", KAFKA_ENDPOINT),
+                               ("kafka-config", r#"{"s3-tests-rs.unlisted": "1"}"#)]).await
+            .expect_err("a topic with an unlisted kafka-config key was created");
+        assert!(m.contains(UNLISTED) || m.contains("s3-tests-rs.unlisted"),
+                "refused for another reason:  {m}");
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_topic_kafka_config_bad_value() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        let listed = allowed(&sns, "linger.ms", "5").await;
+        let m = create(&sns, &[("push-endpoint", KAFKA_ENDPOINT),
+                               ("kafka-config", r#"{"linger.ms": "soon"}"#)]).await
+            .expect_err("a topic with a value librdkafka rejects was created");
+        if listed {
+            assert!(m.contains("linger.ms") && !m.contains(UNLISTED),
+                    "not librdkafka's refusal:  {m}");
+        } else {
+            assert!(m.contains(UNLISTED), "linger.ms is unlisted, but refused otherwise:  {m}");
+        }
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_topic_kafka_config_not_an_object() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        for config in [r#"not json"#, r#"["client.id"]"#, r#"{"client.id": {"a": 1}}"#,
+                       r#"{"client.id": null}"#] {
+            let m = create(&sns, &[("push-endpoint", KAFKA_ENDPOINT),
+                                   ("kafka-config", config)]).await
+                .expect_err(&format!("a topic with kafka-config {config} was created"));
+            assert!(m.contains("kafka-config"), "{config}:  refused for another reason:  {m}");
+        }
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_topic_kafka_config_numbers_and_booleans() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        if !allowed(&sns, "linger.ms", "5").await {
+            let m = create(&sns, &[("push-endpoint", KAFKA_ENDPOINT),
+                                   ("kafka-config", r#"{"linger.ms": 5}"#)]).await
+                .expect_err("an unlisted key was accepted");
+            assert!(m.contains(UNLISTED), "{m}");
+            return;
+        }
+        /* NooBaa's kafka_options_object carries numbers as numbers */
+        let arn = create(&sns, &[("push-endpoint", KAFKA_ENDPOINT),
+                                 ("kafka-config", r#"{"linger.ms": 5}"#)]).await
+            .expect("a number value refused");
+        sns.delete_topic().topic_arn(&arn).send().await.unwrap();
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_topic_kafka_config_set_attributes() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        let arn = create(&sns, &[("push-endpoint", KAFKA_ENDPOINT)]).await.unwrap();
+        let set = |value: &'static str| sns.set_topic_attributes().topic_arn(&arn)
+            .attribute_name("kafka-config").attribute_value(value).send();
+        if !allowed(&sns, "client.id", "s3-tests-rs").await {
+            let e = set(r#"{"client.id": "first"}"#).await
+                .expect_err("SetTopicAttributes set an unlisted key");
+            let m = e.into_service_error().message().unwrap_or_default().to_string();
+            assert!(m.contains(UNLISTED), "{m}");
+            sns.delete_topic().topic_arn(&arn).send().await.unwrap();
+            return;
+        }
+        set(r#"{"client.id": "first"}"#).await.unwrap();
+        let args = endpoint_args(&endpoint(&sns, &arn).await);
+        assert_eq!(args.get("kafka-config").map(String::as_str), Some(r#"{"client.id": "first"}"#));
+
+        /* the set is replaced whole */
+        set(r#"{"client.id": "second"}"#).await.unwrap();
+        let args = endpoint_args(&endpoint(&sns, &arn).await);
+        assert_eq!(args.get("kafka-config").map(String::as_str), Some(r#"{"client.id": "second"}"#));
+        assert_eq!(args.keys().filter(|k| *k == "kafka-config").count(), 1);
+
+        /* and checked as at creation */
+        let e = set(r#"{"s3-tests-rs.unlisted": "1"}"#).await
+            .expect_err("SetTopicAttributes set an unlisted key");
+        let m = e.into_service_error().message().unwrap_or_default().to_string();
+        assert!(m.contains(UNLISTED) || m.contains("s3-tests-rs.unlisted"), "{m}");
+
+        set("").await.unwrap();
+        let args = endpoint_args(&endpoint(&sns, &arn).await);
+        assert_eq!(args.get("kafka-config").map(String::as_str), Some(""));
+        sns.delete_topic().topic_arn(&arn).send().await.unwrap();
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_topic_kafka_config_secret() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        if !allowed(&sns, "sasl.password", "x").await
+            || !allowed(&sns, "security.protocol", "SASL_SSL").await {
+            let m = create(&sns, &[("push-endpoint", KAFKA_ENDPOINT),
+                                   ("kafka-config", r#"{"sasl.password": "x"}"#)]).await
+                .expect_err("an unlisted key was accepted");
+            assert!(m.contains(UNLISTED), "{m}");
+            return;
+        }
+        const INSECURE: &str = "secure";
+        let secure_transport = s3_tests_rs::config::get_config().default_is_secure;
+
+        /* over TLS to the broker:  a secret, marked so */
+        let tls = create(&sns, &[("push-endpoint", KAFKA_ENDPOINT),
+            ("kafka-config", r#"{"security.protocol": "SASL_SSL", "sasl.password": "x"}"#)]).await;
+        /* over cleartext to the broker */
+        let plain = create(&sns, &[("push-endpoint", KAFKA_ENDPOINT),
+            ("kafka-config", r#"{"security.protocol": "SASL_PLAINTEXT", "sasl.password": "x"}"#)]).await;
+        /* use-ssl and no security.protocol */
+        let use_ssl = create(&sns, &[("push-endpoint", KAFKA_ENDPOINT), ("use-ssl", "true"),
+            ("kafka-config", r#"{"sasl.password": "x"}"#)]).await;
+
+        match &tls {
+            Ok(arn) => {
+                assert_eq!(endpoint(&sns, arn).await["HasStoredSecret"], true,
+                           "a kafka-config secret is not marked");
+            }
+            Err(m) => {
+                /* only rgw_allow_notification_secrets_in_cleartext, unset,
+                 * refuses a secret over a request without TLS */
+                assert!(!secure_transport, "refused over TLS:  {m}");
+                assert!(m.contains(INSECURE), "{m}");
+            }
+        }
+        /* one option governs both the request and the broker:  with
+         * the request in cleartext, the cleartext broker is refused
+         * exactly when the TLS broker is */
+        if !secure_transport {
+            assert_eq!(plain.is_ok(), tls.is_ok(), "{plain:?} against {tls:?}");
+        }
+        if let Err(m) = &plain {
+            assert!(m.contains(INSECURE), "{m}");
+        }
+        assert_eq!(use_ssl.is_ok(), tls.is_ok(), "{use_ssl:?} against {tls:?}");
+        for arn in [tls, plain, use_ssl].into_iter().flatten() {
+            sns.delete_topic().topic_arn(&arn).send().await.unwrap();
+        }
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_topic_http_client_certificate_whole() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        for (k, v) in [("ssl-certificate-location", "/nonexistent/client.pem"),
+                       ("ssl-key-location", "/nonexistent/client-key.pem")] {
+            let m = create(&sns, &[("push-endpoint", "https://127.0.0.1:1"), (k, v)]).await
+                .expect_err(&format!("an HTTP topic with only {k} was created"));
+            assert!(m.contains("ssl-certificate-location"), "{k}:  {m}");
+        }
+        let arn = create(&sns, &[("push-endpoint", "https://127.0.0.1:1"),
+                                 ("ssl-certificate-location", "/nonexistent/client.pem"),
+                                 ("ssl-key-location", "/nonexistent/client-key.pem")]).await
+            .expect("an HTTP topic with a whole client certificate");
+        sns.delete_topic().topic_arn(&arn).send().await.unwrap();
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_topic_endpoint_args_escaped() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        let value = "/a&b=c%41+d";
+        let arn = create(&sns, &[("push-endpoint", "https://127.0.0.1:1"),
+                                 ("ca-location", value), ("cloudevents", "true")]).await
+            .unwrap();
+        let args = endpoint_args(&endpoint(&sns, &arn).await);
+        assert_eq!(args.get("ca-location").map(String::as_str), Some(value));
+        assert_eq!(args.get("cloudevents").map(String::as_str), Some("true"));
+
+        let value = "/x+y&z%";
+        sns.set_topic_attributes().topic_arn(&arn).attribute_name("ca-location")
+            .attribute_value(value).send().await.unwrap();
+        let args = endpoint_args(&endpoint(&sns, &arn).await);
+        assert_eq!(args.get("ca-location").map(String::as_str), Some(value));
+        assert_eq!(args.get("cloudevents").map(String::as_str), Some("true"));
+        sns.delete_topic().topic_arn(&arn).send().await.unwrap();
+    }
+}
+
 /* The HTTP subset of test_bn.py, against an endpoint in the test process
  * (s3_tests_rs::notify_receiver).  The five tests whose topics are not
  * persistent;  test_lifecycle_http, test_lifecycle_abort_mpu and
@@ -2375,5 +2727,73 @@ mod http_event_types {
         s3.delete_object().bucket(&bucket).key("acl").send().await.unwrap();
         sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
         s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
+    /* HTTPS to a receiver under a CA of its own:  the topic's ca-location
+     * names that CA, and with mTLS its ssl-certificate-location and
+     * ssl-key-location the client certificate.  Each case also delivers
+     * without the setting, which the receiver's handshake refuses, so a
+     * setting the gateway ignored would fail the test.  The files are
+     * the test process's, so the gateway must share its filesystem. */
+    async fn https_delivers(attributes: &[(&str, &str)], receiver: &HttpReceiver) -> bool {
+        let (sns, s3) = (get_sns_root_client(), get_iam_root_s3client());
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let mut req = sns.create_topic().name(format!("{bucket}_topic"))
+            .attributes("push-endpoint", receiver.endpoint());
+        for (k, v) in attributes {
+            req = req.attributes(*k, *v);
+        }
+        let topic_arn = req.send().await.unwrap().topic_arn().unwrap().to_string();
+        s3.put_bucket_notification_configuration().bucket(&bucket)
+            .notification_configuration(NotificationConfiguration::builder()
+                .topic_configurations(TopicConfiguration::builder()
+                    .id(format!("{bucket}_notif")).topic_arn(&topic_arn)
+                    .events(Event::from("s3:ObjectCreated:*")).build().unwrap())
+                .build())
+            .send().await.unwrap();
+        let handshakes = receiver.failed_handshakes();
+        s3.put_object().bucket(&bucket).key("https")
+            .body(ByteStream::from_static(b"https body")).send().await.unwrap();
+        settle().await;
+        let got = records(&receiver.take());
+        let delivered = got.iter().any(|r| r["s3"]["bucket"]["name"] == bucket.as_str()
+                                           && r["s3"]["object"]["key"] == "https");
+        if !delivered {
+            assert!(receiver.failed_handshakes() > handshakes,
+                    "no event, and no refused handshake either");
+        }
+        s3.delete_object().bucket(&bucket).key("https").send().await.unwrap();
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+        delivered
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_https_ca_location() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let receiver = HttpReceiver::start_tls(false).await;
+        let ca = receiver.tls_files().ca.to_str().unwrap().to_string();
+        assert!(!https_delivers(&[], &receiver).await,
+                "delivered to a server whose CA the gateway was not given");
+        assert!(https_delivers(&[("ca-location", &ca)], &receiver).await,
+                "not delivered with ca-location");
+    }
+
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_https_client_certificate() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let receiver = HttpReceiver::start_tls(true).await;
+        let files = receiver.tls_files();
+        let (ca, cert, key) = (files.ca.to_str().unwrap().to_string(),
+                               files.client_cert.to_str().unwrap().to_string(),
+                               files.client_key.to_str().unwrap().to_string());
+        assert!(!https_delivers(&[("ca-location", &ca)], &receiver).await,
+                "delivered to a server requiring a client certificate, without one");
+        assert!(https_delivers(&[("ca-location", &ca), ("ssl-certificate-location", &cert),
+                                 ("ssl-key-location", &key)], &receiver).await,
+                "not delivered with a client certificate");
     }
 }
