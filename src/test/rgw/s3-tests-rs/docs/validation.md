@@ -19,7 +19,7 @@ wrong;  the rest are listed so a failure is not a surprise.
 | every directory above the data roots searchable by every user (`o+x`) | impersonated identities are system users that own none of those directories;  a `0700` home directory is the usual one that blocks them | `rgw-vstart.sh --with-impersonation` for the gateway's data root;  `validate.rs` and the stand-up's `config` for a conversion's work directory |
 | `sudo` from a terminal, run as yourself and not as root | `rgw-vstart.sh --with-impersonation` creates the fixture's system users and group, applies `setcap`, and owns files as them | `validate.rs` asks for the password once;  both refuse root |
 | uids 70101-70110 and gid 70010 free, or already the fixture's | the fixture creates `rgwalice`, `rgwbob` and the rest at those ids, and the group `rgwfix` | `rgw-vstart.sh`, which reuses accounts that exist by name |
-| port 8000 free for the gateway | `rgw-vstart.sh` stops whatever holds it (`fuser -k 8000/tcp`) | -- |
+| the port your `s3tests.conf` names (`[DEFAULT] port`, 8000 in the sample) free for the gateway | `validate.rs` starts every gateway there, through `rgw-vstart.sh --port`;  the script stops every radosgw of the build, and whatever else of yours holds the port | `rgw-vstart.sh`:  it refuses a start unless the radosgw it started is alive and listening, so a gateway it could not stop, such as root's, cannot answer for it |
 | a copy of `s3tests.conf.SAMPLE`, named by `S3TEST_CONF` or `validate.rs`'s `conf` | the suite's users and keys;  the sample already matches what `vstart.sh` creates | `validate.rs`:  the file exists |
 | `cargo-nextest`, and a nightly toolchain (`rustup toolchain install nightly`) | the suite runs under nextest;  `validate.rs` and `standup.rs` are `-Zscript` files | -- |
 | `python3` | `rgw-vstart.sh --with-impersonation` seeds its fixture with `nsfs-impersonate-fixture.py` | -- |
@@ -49,9 +49,10 @@ for the semantics it gives.  Its dimensions:
 | access model | `posix-strict`, `s3-native` | `--access-model`;  meaningful only under impersonation, so the unimpersonated deployment has one |
 | the tree | fresh, or adopted from NooBaa | `rgw-vstart.sh`, or the adoption stand-up |
 | user identity override | off, on | `--user-identity-override` |
+| role identity override | off, on | `--role-identity-override` |
 
-Three fresh setups and three adopted ones, each with the override off
-and on, make twelve deployments;  four more follow the table:
+Three fresh setups and three adopted ones, each under the four settings
+of the two overrides, make 24 deployments;  four more follow the table:
 
 | deployment | started as | runs |
 |---|---|---|
@@ -61,7 +62,9 @@ and on, make twelve deployments;  four more follow the table:
 | `conversion` | the stand-up, not impersonated | the adoption corpus |
 | `conversion-posix-strict` | the stand-up, impersonated, `posix-strict` | the adoption corpus, and the stand-up's `groups`, `nsswitch` and `copy` steps |
 | `conversion-s3-native` | the stand-up, impersonated, `s3-native` | the same |
-| each with `-override` | the same, with `--user-identity-override` | the same;  tests that resolve an account user expect its own row |
+| each with `-user` | the same, with `--user-identity-override` | the same;  tests that resolve an account user expect its own row |
+| each with `-role` | the same, with `--role-identity-override` | the same;  a role session runs as its own row where it has one, and the roles the import makes have none, so they still run as their account |
+| each with `-user-role` | the same, with both | the same, under both |
 
 | deployment | started as | runs |
 |---|---|---|
@@ -70,7 +73,7 @@ and on, make twelve deployments;  four more follow the table:
 | `kafka` | not impersonated, `--with-kafka` | `test_sns` built with `has_kafka`, against the broker it starts;  needs podman |
 | `conversion-kafka` | the stand-up, with `kafka-vstart.sh`'s broker | the adoption corpus, and the `notify` steps' Kafka half;  needs podman |
 
-The four run only when `--cells` names them.  The deployments other
+The four run only when `--cells` or `--preset full` names them.  The deployments other
 than `plain` run with the default bucket profile, `shared`.
 
 ### 2.  Switches tested inside a deployment
@@ -85,8 +88,10 @@ impersonated fresh deployment, against the same gateway:
 | `rgw_nsfs_dynamic_supplemental_groups` | `dynamic-groups`, then `dynamic-groups-membership` after `gpasswd -d` | that an identity with no group list takes its Unix groups, and follows a change of membership |
 | `rgw_nsfs_role_identity_override` | `role-identity` | that a role given a row runs as it, and its new buckets follow it, and otherwise as its account |
 
-So each is tested under both access models and both settings of the
-user override, without a deployment of its own.  Each test puts the
+So each is tested under both access models and all four settings of the
+two overrides.  The role override is also a dimension (1, above):
+`role-identity` switches it within a deployment, and puts back the
+deployment's own setting.  Each test puts the
 gateway's own setting back when it finishes.  They are kept out of
 `baseline` because each changes what every test beside it sees;
 within `-P all` each runs alone, holding every test thread.
@@ -182,24 +187,45 @@ done
 The build step is the slow one:  NooBaa's dependency tree and its
 native addon.
 
-**The full matrix** is every deployment, named:
+**The full matrix** is every deployment:
 
 ```bash
-./scripts/validate.rs \
-  --cells posix-strict,s3-native,plain,posix-strict-override,s3-native-override,plain-override,conversion,conversion-posix-strict,conversion-s3-native,conversion-override,conversion-posix-strict-override,conversion-s3-native-override,conversion-automatic,conversion-promotion,kafka,conversion-kafka
+./scripts/validate.rs --preset full
 ```
 
-That is the run that says a change is done.  **With no `--cells` you
-get only the six fresh deployments and the unit suite**:  the
-conversion deployments run only when `--cells` names them, so a clean
+That is the run that says a change is done.  **With no `--cells` or
+`--preset` you get only the twelve fresh deployments and the unit
+suite**:  the conversion deployments run only when named, so a clean
 default run says nothing about adoption.
+
+`--preset` names a set of deployments kept in `validate.rs`'s
+`PRESETS`, beside `CELLS`:  `full` is every one, so a deployment added
+to `CELLS` joins it unasked.  The other two are compact, and a run of
+either says it validates only what it ran:
+
+| preset | deployments | covers |
+|---|---|---|
+| `quick` | `posix-strict`, `plain` | impersonation on and off, the switches, librgw;  both overrides off, no adoption |
+| `cover` | `posix-strict`, `s3-native-user`, `s3-native-role`, `posix-strict-user-role`, `plain`, `conversion`, `conversion-posix-strict-role`, `conversion-s3-native-user`, `conversion-user-role`, `conversion-promotion` | every value of every dimension at least once, fresh and adopted;  not every combination |
+
+`--overrides` picks which of the four override settings the crossing
+deployments run -- `off`, `user`, `role`, `user-role`, all four by
+default -- and narrows `--cells` and a preset alike:  `--overrides
+off,user` leaves the role override out.  A deployment `--cells` names
+outright and `--overrides` excludes is refused;  one a preset names is
+left out.  `plain` is in `cover` with both overrides off, so every
+narrowing of `cover` keeps impersonation off and librgw.  `--preset`
+and `--cells` are exclusive.
 
 **A partial run** is for iterating, and validates only what it ran:
 
 | to | run |
 |---|---|
-| check a driver change quickly | no `--cells`:  the unit suite and the six fresh deployments |
-| run the adoption matrix alone | `--no-unit --cells conversion,conversion-posix-strict,conversion-s3-native,conversion-override,conversion-posix-strict-override,conversion-s3-native-override,conversion-automatic,conversion-promotion,conversion-kafka` |
+| check a driver change quickly | `--preset quick`:  the unit suite, `posix-strict` and `plain` |
+| check every dimension once | `--preset cover` |
+| leave the role override out | `--overrides off,user`, with any of the others |
+| the fresh deployments only | no `--cells`:  the unit suite and the twelve fresh deployments |
+| run the adoption matrix alone | `--no-unit --cells conversion,conversion-user,conversion-role,conversion-user-role,conversion-posix-strict,conversion-posix-strict-user,conversion-posix-strict-role,conversion-posix-strict-user-role,conversion-s3-native,conversion-s3-native-user,conversion-s3-native-role,conversion-s3-native-user-role,conversion-automatic,conversion-promotion,conversion-kafka` |
 | repeat one deployment | `--cells posix-strict` |
 | re-run without rebuilding | add `--no-build`;  the binaries in `--build` are used as they are |
 | run one test in every deployment that has it | `--test 'test(=module::test_name)'`, which replaces each deployment's profiles with that filter |
@@ -213,25 +239,27 @@ directory per deployment with one log per step, and `summary.txt`, one
 line per step with `ok`, `KNOWN` or `FAIL`.  `KNOWN` means every step
 passed and a defect already on the expected-difference list remains
 (below).  The exit status is 0 for all `ok`, 3 for `KNOWN`, 1 for any
-`FAIL`.  Every label names the user identity override, and the
-gateway's startup line is checked against it, so a deployment cannot
-pass while running the wrong setting.  Start at `summary.txt`, then
+`FAIL`.  Every label names both identity overrides, and the gateway's
+startup line is checked against them, so a deployment cannot pass while
+running the wrong setting.  A run that leaves anything out -- a preset
+short of `full`, or override settings -- says so at the top of the plan
+and of `summary.txt`.  Start at `summary.txt`, then
 open the step's log.
 
 **One run at a time, and no build during one.**  Every fresh
-deployment starts on the same port, and the run uses the binaries in
+deployment starts on the same port, the one `conf` names, and the run uses the binaries in
 the build tree as it finds them at each step.
 
 ## The adoption matrix, and reading its result
 
 Adoption is RGW serving a tree NooBaa wrote.  The adoption matrix is
-the nine conversion deployments.  Each runs
+the fifteen conversion deployments.  Each runs
 `scripts/adoption/standup.rs conversion` from a fresh work directory:
 NooBaa writes a tree, the conversion corpus captures it three times,
 and the captures are compared.  `scripts/adoption/README.md`
 describes the stand-up, and its steps in sequence.
 
-The nine differ in how RGW is started over the tree, or in what adopts
+The fifteen differ in how RGW is started over the tree, or in what adopts
 it, and so in what they show:
 
 | deployment | RGW is started | what it adds |
@@ -239,7 +267,9 @@ it, and so in what they show:
 | `conversion` | as the gateway's own identity | the format:  adoption and conversion of every corpus shape, with ownership out of the picture |
 | `conversion-posix-strict` | impersonated, `posix-strict` | that the adopted tree is served as its owners, as NooBaa serves it;  the `groups`, `nsswitch` and `copy` steps run |
 | `conversion-s3-native` | impersonated, `s3-native` | the same under the other access model |
-| each with `-override` | as above, `--user-identity-override` | an IAM user NooBaa serves from its own copy is served the same;  `copy rgw` expects the user's own row instead of the account's |
+| each with `-user` | as above, `--user-identity-override` | an IAM user NooBaa serves from its own copy is served the same;  `copy rgw` expects the user's own row instead of the account's |
+| each with `-role` | as above, `--role-identity-override` | the imported role is assumed and served as its account, since the import gives it no row of its own:  `role-rgw` under the override |
+| each with `-user-role` | as above, with both | both |
 | `conversion-automatic` | as `conversion`;  `adopt` restarts it in `automatic` | that the queue adopts the whole store from startup, fails the damaged record, and observes completion after its abandonment |
 | `conversion-promotion` | as `conversion`;  `adopt` switches it to `automatic` with one worker | the request path:  a held bucket's read served as found, its write 503, the promoted bucket taken next |
 | `conversion-kafka` | as `conversion`, with a Kafka broker | NooBaa's Kafka connection carried across as a topic, its events compared with RGW's |
