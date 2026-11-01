@@ -21,7 +21,9 @@ edition = "2021"
 //! same tty's ticket.  Run it from your own terminal, as yourself.
 //!
 //!   scripts/validate.rs [--dry-run] [--no-build] [--no-unit] [--no-librgw]
-//!                       [--lifecycle] [--cells a,b] [--test EXPR]
+//!                       [--lifecycle] [--cells a,b | --preset NAME]
+//!                       [--overrides LIST]
+//!                       [--test EXPR]
 //!                       [--config FILE] [--build DIR] [--conf FILE]
 //!                       [--adoption-cache DIR] [--noobaa-src DIR]
 //!                       [--work-root DIR] [--parallel-log FILE]
@@ -48,6 +50,18 @@ edition = "2021"
 //! conversion cells -- the adoption corpus, `standup.rs conversion` --
 //! run only when named:  each takes a fresh work directory, with the
 //! NooBaa worktree already built in `--adoption-cache` linked into it.
+//!
+//! `--overrides` picks which settings of the two identity overrides the
+//! cells that cross them run:  `off`, `user`, `role`, `user-role`, comma
+//! separated;  all four by default.  `--overrides off,user` leaves the
+//! role override out.  It narrows `--cells` the same way, and a cell
+//! that does not cross the overrides ignores it.  A run that leaves a
+//! setting out says so, and validates only what it ran.
+//!
+//! `--preset` runs a named set of cells in place of `--cells`:  `quick`,
+//! `cover` or `full` (`PRESETS`).  Only `full` is the whole matrix;  a
+//! run of another says so.  `--overrides` narrows a preset too, leaving
+//! out the cells it excludes.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, IsTerminal, Write};
@@ -87,10 +101,10 @@ enum Suite {
 
 struct Cell {
     name: &'static str,
-    /* rgw_nsfs_user_identity_override:  passed to the gateway,
-     * shown in every label, and checked against what the gateway says
-     * it runs */
-    user_identity_override: bool,
+    /* run under each of the four settings of the two identity
+     * overrides, as `<name>`, `<name>-user`, `<name>-role` and
+     * `<name>-user-role`;  only `<name>`, with both off, otherwise */
+    overrides: bool,
     /* empty:  the suite stands its own gateway up */
     vstart: &'static [&'static str],
     suites: &'static [Suite],
@@ -98,16 +112,20 @@ struct Cell {
     by_default: bool,
 }
 
-/* Adding a configuration is an edit here. */
+/* Adding a configuration is an edit here.  A cell with `overrides`
+ * is four deployments:  rgw_nsfs_user_identity_override, an account
+ * user's own row overriding its account's, as NooBaa serves an IAM user
+ * from its own record;  and rgw_nsfs_role_identity_override, a role
+ * given an identity running as it, NooBaa's documented future. */
 const CELLS: &[Cell] = &[
-    Cell { name: "posix-strict", user_identity_override: false,
+    Cell { name: "posix-strict", overrides: true,
            vstart: &["--store", "nsfs", "--with-impersonation", "--clean"],
            suites: &[Suite::Profile("baseline"),
                      Suite::Profile("access-model-switch"),
                      Suite::DynamicGroups,
                      Suite::Profile("role-identity")],
            by_default: true },
-    Cell { name: "s3-native", user_identity_override: false,
+    Cell { name: "s3-native", overrides: true,
            vstart: &["--store", "nsfs", "--with-impersonation",
                      "--access-model", "s3-native", "--clean"],
            suites: &[Suite::Profile("baseline"),
@@ -115,7 +133,7 @@ const CELLS: &[Cell] = &[
                      Suite::DynamicGroups,
                      Suite::Profile("role-identity")],
            by_default: true },
-    Cell { name: "plain", user_identity_override: false,
+    Cell { name: "plain", overrides: true,
            vstart: &["--store", "nsfs", "--bucket-profile", "strong", "--clean",
                      "-o", KAFKA_CONFIG_KEYS],
            suites: &[Suite::Profile("baseline"), Suite::Librgw],
@@ -124,15 +142,15 @@ const CELLS: &[Cell] = &[
      * and after conversion, and the captures are compared -- with RGW
      * as the gateway's own identity, and impersonating under each
      * access model */
-    Cell { name: "conversion", user_identity_override: false, vstart: &[],
+    Cell { name: "conversion", overrides: true, vstart: &[],
            suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
                                        adopt_by: "command", kafka: false }],
            by_default: false },
-    Cell { name: "conversion-posix-strict", user_identity_override: false, vstart: &[],
+    Cell { name: "conversion-posix-strict", overrides: true, vstart: &[],
            suites: &[Suite::Conversion { impersonate: true, access_model: "posix-strict",
                                        adopt_by: "command", kafka: false }],
            by_default: false },
-    Cell { name: "conversion-s3-native", user_identity_override: false, vstart: &[],
+    Cell { name: "conversion-s3-native", overrides: true, vstart: &[],
            suites: &[Suite::Conversion { impersonate: true, access_model: "s3-native",
                                        adopt_by: "command", kafka: false }],
            by_default: false },
@@ -143,7 +161,7 @@ const CELLS: &[Cell] = &[
     /* the notification tests against a Kafka broker:  the one cell
      * that builds `has_kafka`.  Off by default, since the sidecar needs
      * podman */
-    Cell { name: "kafka", user_identity_override: false,
+    Cell { name: "kafka", overrides: false,
            vstart: &["--store", "nsfs", "--clean", "--with-kafka", "-o", KAFKA_CONFIG_KEYS],
            suites: &[Suite::Kafka],
            by_default: false },
@@ -151,53 +169,39 @@ const CELLS: &[Cell] = &[
      * Kafka connection, carried across by the import as a topic with
      * its librdkafka settings, compared as `noobaa:rgw-notify-kafka`.
      * Off by default, since the broker needs podman */
-    Cell { name: "conversion-kafka", user_identity_override: false, vstart: &[],
+    Cell { name: "conversion-kafka", overrides: false, vstart: &[],
            suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
                                        adopt_by: "command", kafka: true }],
            by_default: false },
-    Cell { name: "conversion-automatic", user_identity_override: false, vstart: &[],
+    Cell { name: "conversion-automatic", overrides: false, vstart: &[],
            suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
                                        adopt_by: "automatic", kafka: false }],
            by_default: false },
-    Cell { name: "conversion-promotion", user_identity_override: false, vstart: &[],
+    Cell { name: "conversion-promotion", overrides: false, vstart: &[],
            suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
                                        adopt_by: "promotion", kafka: false }],
            by_default: false },
-    /* the same six with rgw_nsfs_user_identity_override on:  an
-     * account user's own row overrides its account's, as NooBaa serves
-     * an IAM user from its own record */
-    Cell { name: "posix-strict-override", user_identity_override: true,
-           vstart: &["--store", "nsfs", "--with-impersonation", "--clean"],
-           suites: &[Suite::Profile("baseline"),
-                     Suite::Profile("access-model-switch"),
-                     Suite::DynamicGroups,
-                     Suite::Profile("role-identity")],
-           by_default: true },
-    Cell { name: "s3-native-override", user_identity_override: true,
-           vstart: &["--store", "nsfs", "--with-impersonation",
-                     "--access-model", "s3-native", "--clean"],
-           suites: &[Suite::Profile("baseline"),
-                     Suite::Profile("access-model-switch"),
-                     Suite::DynamicGroups,
-                     Suite::Profile("role-identity")],
-           by_default: true },
-    Cell { name: "plain-override", user_identity_override: true,
-           vstart: &["--store", "nsfs", "--bucket-profile", "strong", "--clean",
-                     "-o", KAFKA_CONFIG_KEYS],
-           suites: &[Suite::Profile("baseline"), Suite::Librgw],
-           by_default: true },
-    Cell { name: "conversion-override", user_identity_override: true, vstart: &[],
-           suites: &[Suite::Conversion { impersonate: false, access_model: "posix-strict",
-                                       adopt_by: "command", kafka: false }],
-           by_default: false },
-    Cell { name: "conversion-posix-strict-override", user_identity_override: true, vstart: &[],
-           suites: &[Suite::Conversion { impersonate: true, access_model: "posix-strict",
-                                       adopt_by: "command", kafka: false }],
-           by_default: false },
-    Cell { name: "conversion-s3-native-override", user_identity_override: true, vstart: &[],
-           suites: &[Suite::Conversion { impersonate: true, access_model: "s3-native",
-                                       adopt_by: "command", kafka: false }],
-           by_default: false },
+];
+
+/* Named sets of cells, for `--preset`.  `cells: None` is every cell. */
+struct Preset {
+    name: &'static str,
+    cells: Option<&'static [&'static str]>,
+    what: &'static str,
+}
+
+const PRESETS: &[Preset] = &[
+    Preset { name: "quick", cells: Some(&["posix-strict", "plain"]),
+             what: "impersonation on and off, the switches and librgw;  both overrides off, no adoption" },
+    /* every value of every dimension once, fresh and adopted;  not every
+     * combination */
+    Preset { name: "cover",
+             cells: Some(&["posix-strict", "s3-native-user", "s3-native-role", "posix-strict-user-role",
+                           "plain",
+                           "conversion", "conversion-posix-strict-role", "conversion-s3-native-user",
+                           "conversion-user-role", "conversion-promotion"]),
+             what: "every value of every dimension once, fresh and adopted;  not every combination" },
+    Preset { name: "full", cells: None, what: "every cell" },
 ];
 
 struct Opts {
@@ -207,11 +211,18 @@ struct Opts {
     librgw: bool,
     lifecycle: bool,
     cells: Option<Vec<String>>,
+    /* the override settings the crossing cells run */
+    overrides: Vec<Overrides>,
+    preset: Option<&'static Preset>,
     test: Option<String>,
     build_dir: PathBuf,
     /* the ceph source tree, from the build's CMakeCache.txt */
     source_dir: PathBuf,
     conf: PathBuf,
+    /* the endpoint `conf` names, `[DEFAULT] host` and `port`:  the
+     * gateway each cell starts serves there */
+    host: String,
+    port: u16,
     adoption_cache: PathBuf,
     noobaa_src: PathBuf,
     /* where the conversion cells' work directories go;  under the run
@@ -229,16 +240,82 @@ struct Step {
     env: Vec<(String, String)>,
     /* the suite's own log convention:  also appended there */
     parallel_log: bool,
-    /* the deployment's rgw_nsfs_user_identity_override;  `None` for the
-     * steps outside any deployment, the build and the unit suite */
-    user_identity_override: Option<bool>,
+    /* the deployment's identity overrides;  `None` for the steps
+     * outside any deployment, the build and the unit suite */
+    overrides: Option<Overrides>,
+}
+
+/// rgw_nsfs_user_identity_override and rgw_nsfs_role_identity_override:
+/// passed to the gateway, shown in every label, and checked against what
+/// the gateway says it runs.
+#[derive(Clone, Copy, PartialEq)]
+struct Overrides {
+    user: bool,
+    role: bool,
+}
+
+impl Overrides {
+    const ALL: [Overrides; 4] = [Overrides { user: false, role: false },
+                                 Overrides { user: true, role: false },
+                                 Overrides { user: false, role: true },
+                                 Overrides { user: true, role: true }];
+
+    /// The cell's name for this setting:  a suffix per override on.
+    fn suffix(self) -> &'static str {
+        match (self.user, self.role) {
+            (false, false) => "",
+            (true, false) => "-user",
+            (false, true) => "-role",
+            (true, true) => "-user-role",
+        }
+    }
+
+    /// The setting's name in `--overrides`.
+    fn name(self) -> &'static str {
+        match self.suffix() {
+            "" => "off",
+            s => &s[1..],
+        }
+    }
+}
+
+/// What a run leaves out, said in the plan and in `summary.txt`:  a
+/// preset short of `full`, and override settings.  Empty for a run of
+/// all four settings and no preset, or `full`.
+fn partial_run(o: &Opts) -> Vec<String> {
+    let mut notes = Vec::new();
+    if let Some(p) = o.preset.filter(|p| p.cells.is_some()) {
+        notes.push(format!("preset {}:  {};  this run validates only what it ran",
+                           p.name, p.what));
+    }
+    let left: Vec<&str> = Overrides::ALL.iter().filter(|ov| !o.overrides.contains(ov))
+        .map(|ov| ov.name()).collect();
+    if !left.is_empty() {
+        notes.push(format!(
+            "overrides:  {} only;  {} left out, so this run validates only what it ran",
+            o.overrides.iter().map(|ov| ov.name()).collect::<Vec<_>>().join(", "),
+            left.join(", ")));
+    }
+    notes
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
+/// A cell's deployments, each with its name:  four for a cell with
+/// `overrides`, one otherwise.
+fn deployments(c: &Cell) -> impl Iterator<Item = (Overrides, String)> + '_ {
+    let n = if c.overrides { 4 } else { 1 };
+    Overrides::ALL[..n].iter().map(move |o| (*o, format!("{}{}", c.name, o.suffix())))
 }
 
 /// How a step is labelled:  its deployment, with every setting that
 /// distinguishes one deployment from another stated rather than implied.
-fn label(cell: &str, over: Option<bool>) -> String {
+fn label(cell: &str, over: Option<Overrides>) -> String {
     match over {
-        Some(on) => format!("{cell} · user-identity-override={}", if on { "on" } else { "off" }),
+        Some(o) => format!("{cell} · user-identity-override={} · role-identity-override={}",
+                           on_off(o.user), on_off(o.role)),
         None => cell.to_string(),
     }
 }
@@ -272,8 +349,12 @@ fn main() {
         .unwrap_or_else(|| run_dir.clone());
     let steps = plan(&opts, &suite_dir, &run_dir, &work_dir);
     println!("validate:  {} steps, logs under {}", steps.len(), run_dir.display());
+    let notes = partial_run(&opts);
+    for n in &notes {
+        println!("validate:  {n}");
+    }
     for s in &steps {
-        println!("  [{}] {}:  {}", label(&s.cell, s.user_identity_override), s.name, s.show());
+        println!("  [{}] {}:  {}", label(&s.cell, s.overrides), s.name, s.show());
     }
     if opts.dry_run {
         return;
@@ -290,7 +371,7 @@ fn main() {
             results.push((s.cell.clone(), s.name.clone(), Res::Fail, "not run:  the cell did not stand up".into()));
             continue;
         }
-        println!("\n==> [{}] {}", label(&s.cell, s.user_identity_override), s.name);
+        println!("\n==> [{}] {}", label(&s.cell, s.overrides), s.name);
         let (res, summary) = run(s, &run_dir, opts.parallel_log.as_deref());
         let ok = res != Res::Fail;
         println!("    {} {summary}", res.label());
@@ -302,16 +383,16 @@ fn main() {
             break;
         }
         if s.name == "vstart" && ok {
-            if let Err(e) = wait_for_gateway() {
+            if let Err(e) = wait_for_gateway(&opts.host, opts.port) {
                 results.push((s.cell.clone(), "gateway".into(), Res::Fail, e));
                 skip_cell = Some(s.cell.clone());
                 continue;
             }
             /* the label is a checked fact:  the gateway says which it runs */
-            if let Some(want) = s.user_identity_override {
-                if let Err(e) = check_user_identity_override(&opts.build_dir, want) {
+            if let Some(want) = s.overrides {
+                if let Err(e) = check_identity_overrides(&opts.build_dir, opts.port, want) {
                     println!("    FAIL  {e}");
-                    results.push((s.cell.clone(), "user-identity-override".into(), Res::Fail, e));
+                    results.push((s.cell.clone(), "identity-overrides".into(), Res::Fail, e));
                     skip_cell = Some(s.cell.clone());
                     continue;
                 }
@@ -321,13 +402,14 @@ fn main() {
     }
 
     let setting = |cell: &str| steps.iter().find(|s| s.cell == cell)
-        .and_then(|s| s.user_identity_override)
-        .map(|on| if on { "on" } else { "off" }).unwrap_or("-");
-    let mut table = String::from(
-        "\ncell                              user-identity-override  step                    result\n");
+        .and_then(|s| s.overrides)
+        .map(|o| (on_off(o.user), on_off(o.role))).unwrap_or(("-", "-"));
+    let mut table: String = notes.iter().map(|n| format!("\n{n}")).collect();
+    table += "\ncell                              user-identity-override  role-identity-override  step                    result\n";
     for (cell, name, res, summary) in &results {
-        table += &format!("{cell:<33} {:<23} {name:<23} {} {summary}\n",
-                          setting(cell), res.label());
+        let (user, role) = setting(cell);
+        table += &format!("{cell:<33} {user:<23} {role:<23} {name:<23} {} {summary}\n",
+                          res.label());
     }
     print!("{table}");
     let _ = fs::write(run_dir.join("summary.txt"), &table);
@@ -344,7 +426,7 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
     let b = &o.build_dir;
     let step = |cell: &str, name: &str, cwd: &Path, argv: Vec<String>| Step {
         cell: cell.into(), name: name.into(), cwd: cwd.to_path_buf(), argv,
-        env: Vec::new(), parallel_log: false, user_identity_override: None,
+        env: Vec::new(), parallel_log: false, overrides: None,
     };
     let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     let mut steps = Vec::new();
@@ -364,11 +446,14 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
     }
 
     let vstart = o.source_dir.join("src/script/rgw/rgw-vstart.sh");
-    for c in CELLS {
+    for (c, (ov, name)) in CELLS.iter().flat_map(|c| deployments(c).map(move |d| (c, d))) {
         match &o.cells {
-            Some(want) if !want.iter().any(|w| w == c.name) => continue,
+            Some(want) if !want.iter().any(|w| *w == name) => continue,
             None if !c.by_default => continue,
             _ => {}
+        }
+        if c.overrides && !o.overrides.contains(&ov) {
+            continue;
         }
         /* refused before anything starts, rather than failing inside the
          * sidecar's start */
@@ -382,14 +467,18 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
         let variants = if o.lifecycle && !c.vstart.is_empty() { &[false, true][..] }
                        else { &[false][..] };
         for lc in variants {
-            let cell = if *lc { format!("{}+lifecycle", c.name) } else { c.name.into() };
+            let cell = if *lc { format!("{name}+lifecycle") } else { name.clone() };
             let mut argv = vec![vstart.to_string_lossy().into_owned()];
             argv.extend(s(c.vstart));
+            argv.extend(["--port".into(), o.port.to_string()]);
             if *lc {
                 argv.push("--with-lifecycle".into());
             }
-            if c.user_identity_override {
+            if ov.user {
                 argv.push("--user-identity-override".into());
+            }
+            if ov.role {
+                argv.push("--role-identity-override".into());
             }
             let first = steps.len();
             if !c.vstart.is_empty() {
@@ -436,7 +525,9 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
                         st.env.push(("ADOPTION_ACCESS_MODEL".into(), access_model.to_string()));
                         st.env.push(("ADOPTION_ADOPT_BY".into(), adopt_by.to_string()));
                         st.env.push(("ADOPTION_USER_IDENTITY_OVERRIDE".into(),
-                                     c.user_identity_override.to_string()));
+                                     ov.user.to_string()));
+                        st.env.push(("ADOPTION_ROLE_IDENTITY_OVERRIDE".into(),
+                                     ov.role.to_string()));
                         let broker = o.source_dir.join("src/script/rgw/kafka-vstart.sh")
                             .to_string_lossy().into_owned();
                         if *kafka {
@@ -509,7 +600,7 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
                 }
             }
             for st in &mut steps[first..] {
-                st.user_identity_override = Some(c.user_identity_override);
+                st.overrides = Some(ov);
             }
         }
     }
@@ -679,10 +770,12 @@ fn vstart_caps(source: &Path) -> Result<String, String> {
 }
 
 /// The gateway answers once vstart has started it, but not at once.
-fn wait_for_gateway() -> Result<(), String> {
+/// `rgw-vstart.sh` has already refused a gateway that is not the one it
+/// started.
+fn wait_for_gateway(host: &str, port: u16) -> Result<(), String> {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(60) {
-        if let Ok(mut s) = TcpStream::connect("127.0.0.1:8000") {
+        if let Ok(mut s) = TcpStream::connect((host, port)) {
             if s.write_all(b"GET / HTTP/1.0\r\n\r\n").is_ok() {
                 let mut first = String::new();
                 if BufReader::new(s).read_line(&mut first).is_ok() && first.starts_with("HTTP/") {
@@ -692,26 +785,31 @@ fn wait_for_gateway() -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    Err("the gateway did not answer on :8000 within 60 s".into())
+    Err(format!("the gateway did not answer on {host}:{port} within 60 s"))
 }
 
 /// What the gateway says it runs, against what this deployment asked
-/// for:  its startup line `nsfs: user identity override on|off, ...`,
-/// the last one in vstart's gateway log.
-fn check_user_identity_override(build: &Path, want: bool) -> Result<(), String> {
-    let log = build.join("out/radosgw.8000.log");
+/// for:  its startup line `nsfs: user identity override on|off, role
+/// identity override on|off`, the last one in vstart's gateway log.  The
+/// `identity-override` hint logs each override alone, so a line naming
+/// one is not the startup line.
+fn check_identity_overrides(build: &Path, port: u16, want: Overrides) -> Result<(), String> {
+    let log = build.join(format!("out/radosgw.{port}.log"));
     let text = fs::read(&log).map_err(|e| format!("{}: {e}", log.display()))?;
     let text = String::from_utf8_lossy(&text);
-    let said = text.lines().rev()
-        .find_map(|l| l.split("nsfs: user identity override ").nth(1))
-        .map(|rest| rest.starts_with("on"));
+    let said = text.lines().rev().find_map(|l| {
+        let rest = l.split("nsfs: user identity override ").nth(1)?;
+        let role = rest.split(", role identity override ").nth(1)?;
+        Some(Overrides { user: rest.starts_with("on"), role: role.starts_with("on") })
+    });
     match said {
-        Some(on) if on == want => Ok(()),
-        Some(on) => Err(format!("asked for user-identity-override={}, and the gateway \
-                                 runs it {}", if want { "on" } else { "off" },
-                                if on { "on" } else { "off" })),
-        None => Err(format!("{} does not say which user identity override the \
-                             gateway runs", log.display())),
+        Some(o) if o == want => Ok(()),
+        Some(o) => Err(format!("asked for user-identity-override={} and \
+                                role-identity-override={}, and the gateway runs \
+                                them {} and {}", on_off(want.user), on_off(want.role),
+                               on_off(o.user), on_off(o.role))),
+        None => Err(format!("{} does not say which identity overrides the gateway \
+                             runs", log.display())),
     }
 }
 
@@ -735,6 +833,8 @@ fn parse_args() -> Opts {
             "--test" => flags.test = Some(val("--test")),
             "--lifecycle" => flags.lifecycle = true,
             "--cells" => flags.cells = Some(val("--cells").split(',').map(str::to_string).collect()),
+            "--preset" => flags.preset = Some(val("--preset")),
+            "--overrides" => flags.overrides = Some(val("--overrides").split(',').map(str::to_string).collect()),
             "--config" => config = Some(PathBuf::from(val("--config"))),
             "--build" => flags.paths.push(("build", val("--build"))),
             "--conf" => flags.paths.push(("conf", val("--conf"))),
@@ -745,11 +845,25 @@ fn parse_args() -> Opts {
             _ => die(&format!("unknown argument {a};  see the header of validate.rs")),
         }
     }
+    let names: Vec<String> = CELLS.iter().flat_map(|c| deployments(c).map(|d| d.1)).collect();
+    let preset = flags.preset.as_deref().map(|want| {
+        if flags.cells.is_some() {
+            die("--preset and --cells name the cells two ways;  give one");
+        }
+        PRESETS.iter().find(|p| p.name == want).unwrap_or_else(|| die(&format!(
+            "no preset {want};  the presets are {}",
+            PRESETS.iter().map(|p| p.name).collect::<Vec<_>>().join(", "))))
+    });
+    if let Some(p) = preset {
+        flags.cells = Some(match p.cells {
+            Some(cells) => cells.iter().map(|c| c.to_string()).collect(),
+            None => names.clone(),
+        });
+    }
     if let Some(want) = &flags.cells {
         for w in want {
-            if !CELLS.iter().any(|c| c.name == w) {
-                die(&format!("no cell {w};  the cells are {}",
-                             CELLS.iter().map(|c| c.name).collect::<Vec<_>>().join(", ")));
+            if !names.contains(w) {
+                die(&format!("no cell {w};  the cells are {}", names.join(", ")));
             }
         }
     }
@@ -767,20 +881,42 @@ fn parse_args() -> Opts {
     let need = |key: &str, flag: &str| path(key).unwrap_or_else(|| die(&format!(
         "no {key}:  pass {flag}, or set `{key} = ...` in {}", file.display())));
 
+    let overrides: Vec<Overrides> = match &flags.overrides {
+        None => Overrides::ALL.to_vec(),
+        Some(want) => {
+            for w in want {
+                if !Overrides::ALL.iter().any(|o| o.name() == w) {
+                    die(&format!("no override setting {w};  the settings are {}",
+                                 Overrides::ALL.map(Overrides::name).join(", ")));
+                }
+            }
+            Overrides::ALL.into_iter().filter(|o| want.iter().any(|w| w == o.name())).collect()
+        }
+    };
+    /* a cell named outright is not dropped by the setting filter;  one a
+     * preset names is */
+    for (c, (ov, name)) in CELLS.iter().flat_map(|c| deployments(c).map(move |d| (c, d))) {
+        if preset.is_none() && c.overrides && !overrides.contains(&ov)
+            && flags.cells.as_ref().is_some_and(|w| w.contains(&name)) {
+            die(&format!("--cells names {name}, and --overrides leaves out {}", ov.name()));
+        }
+    }
     let conversion = CELLS.iter().any(|c| {
         let selected = match &flags.cells {
-            Some(want) => want.iter().any(|w| w == c.name),
+            Some(want) => deployments(c).any(|(_, name)| want.contains(&name)),
             None => c.by_default,
         };
         selected && c.suites.iter().any(|s| matches!(s, Suite::Conversion { .. }))
     });
     let build_dir = need("build", "--build");
     let source_dir = source_tree(&build_dir).unwrap_or_else(|e| die(&e));
+    let conf = need("conf", "--conf");
+    let (host, port) = endpoint(&conf).unwrap_or_else(|e| die(&e));
     Opts {
         dry_run: flags.dry_run, build: !flags.no_build, unit: !flags.no_unit,
         librgw: !flags.no_librgw, lifecycle: flags.lifecycle,
-        cells: flags.cells, test: flags.test,
-        conf: need("conf", "--conf"),
+        cells: flags.cells, overrides, preset, test: flags.test,
+        conf, host, port,
         adoption_cache: if conversion { need("adoption_cache", "--adoption-cache") }
                         else { path("adoption_cache").unwrap_or_default() },
         noobaa_src: if conversion { need("noobaa_src", "--noobaa-src") }
@@ -800,6 +936,8 @@ struct Flags {
     no_librgw: bool,
     lifecycle: bool,
     cells: Option<Vec<String>>,
+    overrides: Option<Vec<String>>,
+    preset: Option<String>,
     test: Option<String>,
     paths: Vec<(&'static str, String)>,
 }
@@ -860,6 +998,35 @@ fn source_tree(build: &Path) -> Result<PathBuf, String> {
         .find_map(|l| l.strip_prefix("CMAKE_HOME_DIRECTORY:INTERNAL="))
         .map(|v| PathBuf::from(v.trim()))
         .ok_or_else(|| format!("{} has no CMAKE_HOME_DIRECTORY", cache.display()))
+}
+
+/// The endpoint an s3tests.conf names, read as the suite reads it
+/// (`src/config.rs`):  `host` in `[DEFAULT]` or `[default]`, required,
+/// and `port` there, 8000 when absent.
+fn endpoint(conf: &Path) -> Result<(String, u16), String> {
+    let text = fs::read_to_string(conf).map_err(|e| format!("{}: {e}", conf.display()))?;
+    let (mut host, mut port) = (None, None);
+    let mut in_default = false;
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') {
+            in_default = line == "[DEFAULT]" || line == "[default]";
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=').filter(|_| in_default) else {
+            continue;
+        };
+        match k.trim() {
+            "host" => host = Some(v.trim().to_string()),
+            "port" => port = Some(v.trim().parse::<u16>()
+                .map_err(|e| format!("{}:  port {}: {e}", conf.display(), v.trim()))?),
+            _ => {}
+        }
+    }
+    match host {
+        Some(h) => Ok((h, port.unwrap_or(8000))),
+        None => Err(format!("{} names no `host` in [DEFAULT]", conf.display())),
+    }
 }
 
 fn die(msg: &str) -> ! {

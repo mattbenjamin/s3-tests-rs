@@ -155,13 +155,19 @@ the same directory.  That is the production story — drain, then upgrade
 — and `adopt` refuses while their endpoint is still running rather than
 warning about it.
 
-`adopt` runs `rgw-vstart.sh` with three things that matter:
+`adopt` runs `rgw-vstart.sh` with four things that matter:
 
 | | |
 |---|---|
+| `--port` | `rgw_port`, default 8000;  `rgw-vstart.sh` refuses a start whose radosgw is not alive after it, so a gateway left on the port cannot answer for this one |
 | `--data-root` | the tree NooBaa wrote, as RGW's base path.  NooBaa's buckets are served from the paths their records give;  the base path is where a bucket created afterwards goes |
 | `--noobaa-config-root` | their config store, so RGW can read what they wrote |
 | `--adoption-mode command` | the driver's default, said explicitly:  nothing is adopted until asked |
+
+With `user_identity_override` or `role_identity_override` set true, it
+adds `--user-identity-override` or `--role-identity-override`, and
+checks that the gateway reports each as asked (`GET /admin/features`)
+before going on.  `validate.rs` sets both, one deployment per setting.
 
 Then `adopt` asks, through Admin Ops as an operator would, since the
 gateway runs in command mode:  the `adoption` driver hint with

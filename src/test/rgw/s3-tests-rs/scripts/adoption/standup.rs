@@ -63,7 +63,8 @@ struct Env {
     ceph_build: Option<PathBuf>,
     /// the NooBaa HTTP port
     port: u16,
-    /// the port RGW serves on after `adopt` -- `rgw-vstart.sh`'s default
+    /// the port RGW serves on after `adopt`, `rgw-vstart.sh --port`;
+    /// default 8000
     rgw_port: u16,
     /// where `notify` listens for both gateways' notifications
     notify_port: u16,
@@ -123,6 +124,9 @@ struct Env {
     /// `rgw_nsfs_user_identity_override` for the gateway, checked
     /// against what it reports once it is up
     user_identity_override: bool,
+    /// `rgw_nsfs_role_identity_override` for the gateway, checked
+    /// against what it reports once it is up
+    role_identity_override: bool,
     /// what adopts the tree at `adopt`:  `command`, the commands, one
     /// bucket at a time;  `automatic`, RGW restarted in automatic mode,
     /// adopting from its startup;  `promotion`, the import's gateway
@@ -270,6 +274,9 @@ impl Env {
             access_model: get("access_model", "posix-strict"),
             user_identity_override: matches!(
                 get("user_identity_override", "false").to_ascii_lowercase().as_str(),
+                "1" | "on" | "true" | "yes"),
+            role_identity_override: matches!(
+                get("role_identity_override", "false").to_ascii_lowercase().as_str(),
                 "1" | "on" | "true" | "yes"),
             adopt_by: get("adopt_by", "command"),
         })
@@ -2937,7 +2944,9 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
             return Err("adopt_by automatic restarts the import's gateway, and \
                         none serves this tree;  run `import` first".into());
         }
-        let mut args = vec!["--restart", "--store", "nsfs", "--adoption-mode", "automatic"];
+        let port = env.rgw_port.to_string();
+        let mut args = vec!["--restart", "--store", "nsfs", "--port", &port,
+                            "--adoption-mode", "automatic"];
         if env.impersonate {
             args.push("--with-impersonation");
         }
@@ -2956,10 +2965,10 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
     } else if serving && step == "adopt" {
         println!("{tag} RGW already serves this tree;  adopting in place");
     } else {
-    println!("         rgw-vstart.sh --store nsfs --data-root {} \
+    println!("         rgw-vstart.sh --store nsfs --port {} --data-root {} \
               --noobaa-config-root {} --adoption-mode command --with-lifecycle \
               -o rgw_notification_bucket_arn_region=false {} {} {}",
-             env.data.display(), env.config_root().display(),
+             env.rgw_port, env.data.display(), env.config_root().display(),
              rgw_etag_opts(env).join(" "), rgw_identity_opts(env).join(" "),
              rgw_notify_opts(env).join(" "));
     let st = Command::new("bash")
@@ -2967,6 +2976,8 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
         .args([
             "--store",
             "nsfs",
+            "--port",
+            &env.rgw_port.to_string(),
             "--data-root",
             &env.data.display().to_string(),
             /* Their store, so RGW can read what NooBaa wrote. */
@@ -3020,16 +3031,18 @@ fn adopt(env: &Env, step: &str) -> Result<(), String> {
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
     /* the label is a checked fact:  the gateway says which it runs */
-    match reported_user_identity_override(env, &admin) {
-        Some(on) if on == env.user_identity_override => {
-            println!("{tag} user identity override {}, as the gateway reports",
-                     if on { "on" } else { "off" });
-        }
-        reported => {
-            return Err(format!(
-                "user_identity_override is {} here, and the gateway reports {}",
-                env.user_identity_override,
-                reported.map(|b| b.to_string()).unwrap_or_else(|| "nothing".into())));
+    for (name, want) in [("user_identity_override", env.user_identity_override),
+                         ("role_identity_override", env.role_identity_override)] {
+        match reported_feature(env, &admin, name) {
+            Some(on) if on == want => {
+                println!("{tag} {} {}, as the gateway reports", name.replace('_', " "),
+                         if on { "on" } else { "off" });
+            }
+            reported => {
+                return Err(format!(
+                    "{name} is {want} here, and the gateway reports {}",
+                    reported.map(|b| b.to_string()).unwrap_or_else(|| "nothing".into())));
+            }
         }
     }
     /* A tree whose adoption is complete has nothing left to import or
@@ -4115,19 +4128,28 @@ fn rgw_identity_opts(env: &Env) -> Vec<String> {
     if env.user_identity_override {
         opts.push("--user-identity-override".into());
     }
+    if env.role_identity_override {
+        opts.push("--role-identity-override".into());
+    }
     opts
 }
 
 /// The gateway's own report of `rgw_nsfs_user_identity_override`, from
 /// `GET /admin/features`.  `None` for a gateway that does not report it.
 fn reported_user_identity_override(env: &Env, admin: &str) -> Option<bool> {
+    reported_feature(env, admin, "user_identity_override")
+}
+
+/// One of the gateway's boolean features, from `GET /admin/features`.
+/// `None` for a gateway that does not report it.
+fn reported_feature(env: &Env, admin: &str, name: &str) -> Option<bool> {
     let (status, body) = rgw_call(admin, "GET",
         &format!("http://127.0.0.1:{}/admin/features", env.rgw_port)).ok()?;
     if status != 200 {
         return None;
     }
     let v = serde_json::from_str::<serde_json::Value>(&body).ok()?;
-    match v.get("features")?.get("user_identity_override")? {
+    match v.get("features")?.get(name)? {
         serde_json::Value::Bool(b) => Some(*b),
         serde_json::Value::String(s) => Some(s == "true"),
         _ => None,
