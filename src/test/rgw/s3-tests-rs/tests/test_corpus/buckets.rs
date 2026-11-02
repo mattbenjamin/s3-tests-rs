@@ -158,8 +158,8 @@ async fn corpus_coverage_bucket_config() {
                      * too.  Conversion adds the mark, so listing it
                      * would report every converted bucket as changed. */
                     if matches!(n.as_str(), "xattr:security.selinux"
-                                | "xattr:user.nsfs.extensions"
-                                | "xattr:user.nsfs.converting") {
+                                | "xattr:user.nsfs.marker.extensions"
+                                | "xattr:user.nsfs.marker.converting") {
                         continue;
                     }
                     m.bucket(&b, concat!($name, ".present"), &n);
@@ -170,7 +170,8 @@ async fn corpus_coverage_bucket_config() {
                  * empty, and the manifest says so;  a converted bucket
                  * keeps it in the attributes listed above. */
                 if !have_records && data_root_bucket(&b).is_some()
-                    && !bucket_state(&b).iter().any(|(n, _)| n == "xattr:user.nsfs.extensions") {
+                    && !bucket_state(&b).iter()
+                        .any(|(n, _)| n == "xattr:user.nsfs.marker.extensions") {
                     m.bucket(&b, concat!($name, ".present"),
                              &format!("record:{}", crate::manifest::UNOBSERVED));
                 }
