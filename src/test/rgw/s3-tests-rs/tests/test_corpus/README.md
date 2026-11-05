@@ -305,13 +305,13 @@ a conversion has to carry across.
 
 | configuration | what it writes on the bucket |
 |---|---|
-| tagging | `user.nsfs.rgw.x-amz-tagging` |
-| CORS | `user.nsfs.rgw.cors` |
-| policy | `user.nsfs.rgw.iam-policy` |
-| lifecycle | `user.nsfs.rgw.lc` |
-| default encryption | `user.nsfs.rgw.sse-s3.policy` |
-| request payment | `user.nsfs.bucket_info`, modified in place |
-| logging | `user.nsfs.rgw.logging`, `user.nsfs.rgw.logging-mtime` |
+| tagging | `user.nsfs:rgw.x-amz-tagging` |
+| CORS | `user.nsfs:rgw.cors` |
+| policy | `user.nsfs:rgw.iam-policy` |
+| lifecycle | `user.nsfs:rgw.lc` |
+| default encryption | `user.nsfs:rgw.sse-s3.policy` |
+| request payment | `user.nsfs:bucket_info`, modified in place |
+| logging | `user.nsfs:rgw.logging`, `user.nsfs:rgw.logging-mtime` |
 
 Versioning and object lock are measured by their own axes.  Logging
 needs a target bucket that carries a policy, not only one that exists:

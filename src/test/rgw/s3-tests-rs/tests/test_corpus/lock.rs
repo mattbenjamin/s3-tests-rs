@@ -1,7 +1,7 @@
 //! Tier 1 -- the object lock axis.
 //!
 //! The axis where the two formats differ in shape rather than in
-//! spelling.  NooBaa writes three plain attributes -- legal hold as the
+//! name.  NooBaa writes three plain attributes -- legal hold as the
 //! literal `ON`/`OFF`, retention as a mode and a date -- against our
 //! ceph-encoded `RGWObjectLegalHold` and our single retention
 //! attribute.  So a conversion here is a value rewrite, not a rename,
@@ -98,7 +98,7 @@ async fn corpus_coverage_object_lock() {
      * declares no retention of its own -- which, written first, would
      * have given the "no lock" artifact a GOVERNANCE retention and
      * made its name a lie.  The disk inventory is what caught that:
-     * every object carried `user.nsfs.rgw.object-retention`, including
+     * every object carried `user.nsfs:rgw.object-retention`, including
      * the ones that asked for nothing.  So the unlocked and
      * explicitly-locked objects go in first, then the rule, then the
      * one object that is there to inherit it. */
