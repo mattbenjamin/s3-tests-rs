@@ -162,7 +162,7 @@ noobaa:unadopted		manifest		part.*.size	absent	same:  the per-part facts come fr
 # on the left may survive on the right.
 
 unadopted:converted		inventory	*.folder	*	appears	an empty directory object has no sentinel in NooBaa's layout, only user.noobaa.dir_content on the directory;  conversion creates the nsfs sentinel for it, empty, with the directory's mtime (convert_directory_object())
-unadopted:converted		inventory	.noobaa-nsfs_*/multipart-uploads/*	*	vanishes	conversion re-stages an upload still in flight out of NooBaa's temp directory (NSFSBucket::convert_uploads);  its record, parts and directory go
+unadopted:converted		inventory	.noobaa-nsfs_*	*	vanishes	NooBaa's temp directory goes whole (remove_noobaa_temp_dir(), DECISIONS.md 2026-11-05):  each upload still in flight is re-staged out of its multipart-uploads/ first (NSFSBucket::convert_uploads), and its uploads/ holds only object writes NooBaa never moved into place
 unadopted:converted		inventory	.multipart_*	*	appears	and into nsfs's staging directory, `.multipart_<key>.<upload id>`, one file per part with a `.meta` record
 unadopted:converted		inventory		xattr:user.nsfs:*	appears	conversion writes each object's attributes as RGW attributes and marks the bucket (`user.nsfs:marker.extensions`).  Appears, not absent:  an nsfs name that vanished would be a loss, since a bucket's own state is under `user.nsfs:` before conversion too
 unadopted:converted		inventory		xattr:user.noobaa.*	vanishes	their internal namespace becomes user.nsfs:* -- NB_KEYS, xattr_strategy.cc:137
