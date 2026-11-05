@@ -20,6 +20,10 @@ edition = "2021"
 //! lasts, so the sudo calls `rgw-vstart.sh` makes go through on the
 //! same tty's ticket.  Run it from your own terminal, as yourself.
 //!
+//! Each cell's `rgw-vstart.sh --clean` stops the gateway before it, and
+//! the run stops the last:  every `radosgw` that started after it did.
+//! A gateway already up when the run began is left alone.
+//!
 //!   scripts/validate.rs [--dry-run] [--no-build] [--no-unit] [--no-librgw]
 //!                       [--lifecycle] [--cells a,b | --preset NAME]
 //!                       [--overrides LIST]
@@ -400,8 +404,12 @@ fn main() {
         }
         results.push((s.cell.clone(), s.name.clone(), res, summary));
     }
+    /* the next cell's --clean stops each cell's gateway but the last */
+    if let Err(e) = stop_our_gateways(&opts.build_dir) {
+        results.push(("run".into(), "stop-gateway".into(), Res::Fail, e));
+    }
 
-    let setting = |cell: &str| steps.iter().find(|s| s.cell == cell)
+    let setting =|cell: &str| steps.iter().find(|s| s.cell == cell)
         .and_then(|s| s.overrides)
         .map(|o| (on_off(o.user), on_off(o.role))).unwrap_or(("-", "-"));
     let mut table: String = notes.iter().map(|n| format!("\n{n}")).collect();
@@ -786,6 +794,55 @@ fn wait_for_gateway(host: &str, port: u16) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(500));
     }
     Err(format!("the gateway did not answer on {host}:{port} within 60 s"))
+}
+
+/// Each gateway this run started, stopped:  a `radosgw` named by a pid
+/// file in the build's `out/` that started after this process did.  A
+/// gateway that was up before the run is not ours, and is left alone.
+fn stop_our_gateways(build: &Path) -> Result<(), String> {
+    /* field 22, starttime, in clock ticks since boot;  the fields after
+     * the parenthesized comm start at field 3 */
+    let started = |pid: &str| fs::read_to_string(format!("/proc/{pid}/stat")).ok()
+        .and_then(|st| st.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(19)?.parse::<u64>().ok()));
+    let Some(ours_since) = started("self") else {
+        return Err("cannot read this process's start time from /proc/self/stat".into());
+    };
+    let Ok(dir) = fs::read_dir(build.join("out")) else {
+        return Ok(());
+    };
+    let mut stuck = Vec::new();
+    for e in dir.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !(name.starts_with("radosgw.") && name.ends_with(".pid")) {
+            continue;
+        }
+        let Some(pid) = fs::read_to_string(e.path()).ok()
+            .and_then(|p| p.trim().parse::<u32>().ok()).map(|p| p.to_string()) else {
+            continue;
+        };
+        let is_radosgw = fs::read_to_string(format!("/proc/{pid}/comm"))
+            .is_ok_and(|c| c.trim() == "radosgw");
+        if !is_radosgw || !started(&pid).is_some_and(|t| t >= ours_since) {
+            continue;
+        }
+        let _ = Command::new("kill").arg(&pid).status();
+        let start = Instant::now();
+        while Path::new(&format!("/proc/{pid}")).exists()
+            && start.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if Path::new(&format!("/proc/{pid}")).exists() {
+            stuck.push(format!("radosgw pid {pid} ({name})"));
+        } else {
+            println!("validate:  stopped radosgw pid {pid} ({name})");
+        }
+    }
+    if stuck.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{} did not stop within 30 s", stuck.join(", ")))
+    }
 }
 
 /// What the gateway says it runs, against what this deployment asked

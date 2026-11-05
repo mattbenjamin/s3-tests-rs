@@ -127,7 +127,11 @@ rather than adapting.
 ## Running the matrix:  `scripts/validate.rs`
 
 `validate.rs` builds, runs the nsfs unit suite, then starts a gateway
-per deployment and runs that deployment's profiles against it.  It
+per deployment and runs that deployment's profiles against it.  Each
+deployment's `rgw-vstart.sh --clean` stops the gateway before it, and
+the run stops the last:  every radosgw that started after the run did.
+A gateway already up when the run began is left alone, and one that
+does not stop within 30 s is a `stop-gateway` `FAIL`.  It
 asks for your `sudo` password once and keeps the ticket alive, and it
 applies every `setcap` itself, so a relink between runs needs nothing
 from you.  Run it from your own terminal, as yourself, from the
