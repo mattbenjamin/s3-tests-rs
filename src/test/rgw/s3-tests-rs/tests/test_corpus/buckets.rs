@@ -70,7 +70,7 @@ fn config_store_record(b: &str) -> Option<std::path::PathBuf> {
 /// configuration to where it landed rather than only to a name:
 ///
 /// ```text
-/// xattr:user.nsfs.rgw.tagset      the bucket directory's attributes
+/// xattr:user.nsfs:rgw.tagset      the bucket directory's attributes
 /// record:cors_configuration_rules a field of the bucket's record
 /// ```
 ///
@@ -158,8 +158,8 @@ async fn corpus_coverage_bucket_config() {
                      * too.  Conversion adds the mark, so listing it
                      * would report every converted bucket as changed. */
                     if matches!(n.as_str(), "xattr:security.selinux"
-                                | "xattr:user.nsfs.marker.extensions"
-                                | "xattr:user.nsfs.marker.converting") {
+                                | "xattr:user.nsfs:marker.extensions"
+                                | "xattr:user.nsfs:marker.converting") {
                         continue;
                     }
                     m.bucket(&b, concat!($name, ".present"), &n);
@@ -171,7 +171,7 @@ async fn corpus_coverage_bucket_config() {
                  * keeps it in the attributes listed above. */
                 if !have_records && data_root_bucket(&b).is_some()
                     && !bucket_state(&b).iter()
-                        .any(|(n, _)| n == "xattr:user.nsfs.marker.extensions") {
+                        .any(|(n, _)| n == "xattr:user.nsfs:marker.extensions") {
                     m.bucket(&b, concat!($name, ".present"),
                              &format!("record:{}", crate::manifest::UNOBSERVED));
                 }

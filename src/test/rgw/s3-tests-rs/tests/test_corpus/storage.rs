@@ -10,7 +10,7 @@
 //! Three things it is after.
 //!
 //! **The attribute.**  A non-default class writes
-//! `user.nsfs.rgw.storage_class` in our format and `user.storage_class`
+//! `user.nsfs:rgw.storage_class` in our format and `user.storage_class`
 //! in theirs -- note *theirs* is not under `user.noobaa.`, the one
 //! name of theirs that is not, which `xattr_strategy.cc` special-cases
 //! because otherwise it falls through to the metadata rule and comes
@@ -64,7 +64,7 @@ fn configured_class() -> String {
  * stores it.  A client asking for GLACIER gets a 200, HEAD reports no
  * class, and the listing says STANDARD.  Measured here on both halves.
  *
- * nsfs stores it as user.nsfs.rgw.storage_class and reports it from
+ * nsfs stores it as user.nsfs:rgw.storage_class and reports it from
  * both HEAD and the listing.  posix is left for rgw-standalone, which
  * owns that line. */
 #[cfg_attr(feature = "fails_on_posix",

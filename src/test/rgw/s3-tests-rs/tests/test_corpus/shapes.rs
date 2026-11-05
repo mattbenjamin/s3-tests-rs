@@ -60,6 +60,9 @@ pub enum MetaClass {
     CollidesContentMd5,
     /// **collides with the attribute holding the storage class**
     CollidesStorageClass,
+    /// keys beginning `nsfs.`, which their gateway stores under
+    /// `user.nsfs.`:  user metadata, not ours, which is `user.nsfs:`
+    UnderNsfs,
     /// a value needing encoding on the wire
     AwkwardValue,
     /// many headers, to approach the response's metadata size limit
@@ -72,6 +75,7 @@ impl MetaClass {
         MetaClass::Plain,
         MetaClass::CollidesContentMd5,
         MetaClass::CollidesStorageClass,
+        MetaClass::UnderNsfs,
         MetaClass::AwkwardValue,
         MetaClass::Many,
     ];
@@ -82,6 +86,7 @@ impl MetaClass {
             MetaClass::Plain => "m-plain".into(),
             MetaClass::CollidesContentMd5 => "m-collide-content-md5".into(),
             MetaClass::CollidesStorageClass => "m-collide-storage-class".into(),
+            MetaClass::UnderNsfs => "m-under-nsfs".into(),
             MetaClass::AwkwardValue => "m-awkward".into(),
             MetaClass::Many => "m-many".into(),
         }
@@ -98,6 +103,10 @@ impl MetaClass {
             MetaClass::CollidesStorageClass => {
                 vec![("storage_class".into(), "NOT_A_CLASS".into())]
             }
+            MetaClass::UnderNsfs => vec![
+                ("nsfs.rgw.content_type".into(), "not/ours".into()),
+                ("nsfs.marker.converting".into(), "noobaa".into()),
+            ],
             MetaClass::AwkwardValue => {
                 vec![("note".into(), "a b+c%d".into())]
             }
@@ -116,6 +125,9 @@ impl MetaClass {
             }
             MetaClass::CollidesStorageClass => {
                 "writes the attribute their gateway holds the storage class in"
+            }
+            MetaClass::UnderNsfs => {
+                "lands under user.nsfs., which must stay user metadata"
             }
             MetaClass::AwkwardValue => "a value needing encoding",
             MetaClass::Many => "approaches the metadata size limit",

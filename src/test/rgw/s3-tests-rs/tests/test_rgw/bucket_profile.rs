@@ -1,6 +1,6 @@
 //! Which buckets carry our extensions, and how one comes to.
 //!
-//! An nsfs bucket directory with no `user.nsfs.marker.extensions` marker is
+//! An nsfs bucket directory with no `user.nsfs:marker.extensions` marker is
 //! NooBaa's:  a bucket RGW has not taken over, read as NooBaa wrote it
 //! and not written.  A marked bucket carries
 //! the extensions.  Every bucket this gateway creates is marked;  an
