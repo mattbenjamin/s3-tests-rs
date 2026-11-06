@@ -8,6 +8,10 @@ serde_json = "1"
 aws-smithy-xml = "=0.60.15"
 md-5 = "0.10"
 base64 = "0.22"
+# the suite's own SigV4 signer, for the requests this signs
+s3-tests-rs = { path = "../.." }
+reqwest = { version = "0.12", default-features = false }
+tokio = { version = "1", features = ["rt"] }
 ---
 //! Stand up NooBaa's NSFS gateway over a data root, so that the
 //! conversion corpus can be run against *their* implementation and the
@@ -1268,9 +1272,8 @@ fn serve(env: &Env) -> Result<(), String> {
 /// `owner`, `iam_path`, and a copy of the account's
 /// `nsfs_account_config`.
 ///
-/// Signed by `curl --aws-sigv4` rather than an SDK, because this
-/// driver has no dependencies and curl is already on every host it
-/// runs on.  `-k`, because the certificate is the one they generate.
+/// Signed by the suite's own SigV4 signer (`signed()`), and the
+/// certificate, the one they generate, is not checked.
 ///
 /// **The credential is shown once.**  NooBaa returns the secret from
 /// `CreateAccessKey` and never again, so it is written to
@@ -1336,17 +1339,12 @@ fn role_config(env: &Env) -> String {
 
 /// An AssumeRole, signed with the account's own key;  the session's
 /// key, secret and token, or the status and body.
-fn assume_role(env: &Env, url: &str, insecure: bool, arn: &str)
+fn assume_role(env: &Env, url: &str, arn: &str)
                -> Result<Result<(String, String, String), (u16, String)>, String> {
-    let form = format!("Action=AssumeRole&RoleArn={arn}&RoleSessionName=standup\
-                        &DurationSeconds=900&Version=2011-06-15");
     let user = format!("{}:{}", env.access_key, env.secret_key);
-    let mut args = vec!["--aws-sigv4", "aws:amz:us-east-1:sts", "--user", &user,
-                        "--data", &form, url];
-    if insecure {
-        args.insert(0, "-k");
-    }
-    let (status, body) = curl(&args)?;
+    let (status, body) = form_call(url, "sts", &user, &[
+        ("Action", "AssumeRole"), ("RoleArn", arn), ("RoleSessionName", "standup"),
+        ("DurationSeconds", "900"), ("Version", "2011-06-15")])?;
     if status != 200 {
         return Ok(Err((status, body)));
     }
@@ -1361,11 +1359,9 @@ fn assume_role(env: &Env, url: &str, insecure: bool, arn: &str)
 fn session_call(session: &(String, String, String), method: &str, url: &str)
                 -> Result<(u16, String), String> {
     let (ak, sk, tok) = session;
-    curl(&["-X", method, "--aws-sigv4", "aws:amz:us-east-1:s3",
-           "--user", &format!("{ak}:{sk}"),
-           "-H", &format!("x-amz-security-token: {tok}"),
-           "--data-binary", if method == "PUT" { "role probe" } else { "" },
-           url])
+    let body: &[u8] = if method == "PUT" { b"role probe" } else { b"" };
+    signed(method, url, "s3", &format!("{ak}:{sk}"), Some(tok), &[], body)
+        .map(|(status, body, _)| (status, body))
 }
 
 /// Assume the account's role through NooBaa, as a 5.23 client does.
@@ -1382,7 +1378,7 @@ fn role_noobaa(env: &Env) -> Result<(), String> {
     }
     let arn = format!("arn:aws:sts::{}:role/{}", env.access_key, env.role);
     let session = match assume_role(env, &format!("https://127.0.0.1:{}/", env.sts_port),
-                                    true, &arn)? {
+                                    &arn)? {
         Ok(s) => s,
         Err((status, body)) => {
             return Err(format!("NooBaa answered AssumeRole of {arn} with {status}:\n{body}"));
@@ -1415,18 +1411,15 @@ fn role_rgw(env: &Env) -> Result<(), String> {
     let sts = format!("http://127.0.0.1:{}/", env.rgw_port);
     /* The ARN as a client learns it after adoption:  IAM GetRole, with
      * the account's own key */
-    let (status, body) = curl(&[
-        "--aws-sigv4", "aws:amz:us-east-1:iam",
-        "--user", &format!("{}:{}", env.access_key, env.secret_key),
-        "--data", &format!("Action=GetRole&RoleName={}&Version=2010-05-08", env.role),
-        &sts,
-    ])?;
+    let (status, body) = form_call(&sts, "iam",
+        &format!("{}:{}", env.access_key, env.secret_key),
+        &[("Action", "GetRole"), ("RoleName", &env.role), ("Version", "2010-05-08")])?;
     let Some(arn) = (status == 200).then(|| xml_tag(&body, "Arn")).flatten() else {
         return Err(format!("RGW answered GetRole {:?} with {status}:\n{body}", env.role));
     };
 
     let nb_arn = format!("arn:aws:sts::{}:role/{}", env.access_key, env.role);
-    if let Ok(_) = assume_role(env, &sts, false, &nb_arn)? {
+    if let Ok(_) = assume_role(env, &sts, &nb_arn)? {
         return Err(format!("RGW assumed {nb_arn}, NooBaa's access-key form, which \
                             adoption does not carry"));
     }
@@ -1435,7 +1428,7 @@ fn role_rgw(env: &Env) -> Result<(), String> {
     if !arn.starts_with("arn:aws:iam::") || !arn.ends_with(&format!(":role/{}", env.role)) {
         return Err(format!("RGW's ARN for the role is {arn}, not an account-id role ARN"));
     }
-    let session = match assume_role(env, &sts, false, &arn)? {
+    let session = match assume_role(env, &sts, &arn)? {
         Ok(s) => s,
         Err((status, body)) => {
             return Err(format!("RGW answered AssumeRole of {arn} with {status}:\n{body}"));
@@ -1482,8 +1475,7 @@ fn groups_step(env: &Env) -> Result<(), String> {
     let write = |key: &str, k: &str| -> Result<u16, String> {
         let who = format!("{key}:{GROUPS_SECRET}");
         let url = format!("http://127.0.0.1:{port}/{GROUPS_BUCKET}/{k}");
-        Ok(curl(&["-X", "PUT", "--aws-sigv4", "aws:amz:us-east-1:s3",
-                  "--user", &who, "--data-binary", k, &url])?.0)
+        Ok(signed("PUT", &url, "s3", &who, None, &[], k.as_bytes())?.0)
     };
     let (in_name, in_user, in_key) = GROUPS_ACCOUNTS[0];
     let (out_name, out_user, out_key) = GROUPS_ACCOUNTS[1];
@@ -1622,10 +1614,9 @@ fn copy_step(env: &Env) -> Result<(), String> {
     let s3 = |port: u16, ak: &str, sk: &str, method: &str, path: &str|
               -> Result<u16, String> {
         let url = format!("http://127.0.0.1:{port}/{path}");
-        Ok(curl(&["-X", method, "--aws-sigv4", "aws:amz:us-east-1:s3",
-                  "--user", &format!("{ak}:{sk}"),
-                  "--data-binary", if method == "PUT" && path.contains('/') {
-                      "copy probe" } else { "" }, &url])?.0)
+        let body: &[u8] = if method == "PUT" && path.contains('/') { b"copy probe" }
+                          else { b"" };
+        Ok(signed(method, &url, "s3", &format!("{ak}:{sk}"), None, &[], body)?.0)
     };
     /* where a bucket landed, and whose its object is;  asked as root,
      * since the directories are the copy users' at 0770 and the corpus
@@ -1711,13 +1702,10 @@ fn copy_step(env: &Env) -> Result<(), String> {
          * grants one implicitly over its account's buckets;  the grant
          * is set-up, not what is tested */
         let policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
-        let (st, body) = curl(&["--aws-sigv4", "aws:amz:us-east-1:iam",
-            "--user", &format!("{key}:{COPY_SECRET}"),
-            "--data-urlencode", "Action=PutUserPolicy",
-            "--data-urlencode", &format!("UserName={user}"),
-            "--data-urlencode", "PolicyName=standup-copy",
-            "--data-urlencode", &format!("PolicyDocument={policy}"),
-            "--data-urlencode", "Version=2010-05-08", &iam])?;
+        let (st, body) = form_call(&iam, "iam", &format!("{key}:{COPY_SECRET}"), &[
+            ("Action", "PutUserPolicy"), ("UserName", user),
+            ("PolicyName", "standup-copy"), ("PolicyDocument", policy),
+            ("Version", "2010-05-08")])?;
         if st != 200 {
             return Err(format!("RGW refused PutUserPolicy on {user}:  {st}\n{body}"));
         }
@@ -1799,8 +1787,7 @@ fn nsswitch_step(env: &Env) -> Result<(), String> {
     };
     let url = |k: &str| format!("http://127.0.0.1:{port}/{NSSWITCH_BUCKET}/{k}");
 
-    let (status, body) = curl(&["-X", "PUT", "--aws-sigv4", "aws:amz:us-east-1:s3",
-                                "--user", &who, "--data-binary", key, &url(key)])?;
+    let (status, body, _) = signed("PUT", &url(key), "s3", &who, None, &[], key.as_bytes())?;
     if status != 200 {
         return Err(format!("{gateway} answered the nsswitch-resolved account's \
                             PUT with {status}:\n{body}"));
@@ -1815,8 +1802,7 @@ fn nsswitch_step(env: &Env) -> Result<(), String> {
     println!("nsswitch {gateway}:  {} written as {dn_name} ({uid}:{gid})", key);
 
     if gateway == "rgw" {
-        let (status, body) = curl(&["--aws-sigv4", "aws:amz:us-east-1:s3",
-                                    "--user", &who, &url("noobaa-wrote")])?;
+        let (status, body, _) = signed("GET", &url("noobaa-wrote"), "s3", &who, None, &[], b"")?;
         if status != 200 || body != "noobaa-wrote" {
             return Err(format!("RGW answered the nsswitch-resolved account's read \
                                 of what NooBaa wrote with {status}:\n{body}"));
@@ -1884,15 +1870,10 @@ fn iam_call(env: &Env, params: &[(&str, &str)]) -> Result<String, String> {
 /// One IAM action against NooBaa, signed with the given key.
 fn iam_call_as(env: &Env, ak: &str, sk: &str, params: &[(&str, &str)])
                -> Result<String, String> {
-    let mut form: Vec<String> = params.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    form.push("Version=2010-05-08".into());
-    let (status, body) = curl(&[
-        "-k",
-        "--aws-sigv4", "aws:amz:us-east-1:iam",
-        "--user", &format!("{ak}:{sk}"),
-        "--data", &form.join("&"),
-        &format!("https://127.0.0.1:{}/", env.iam_port),
-    ])?;
+    let mut form = params.to_vec();
+    form.push(("Version", "2010-05-08"));
+    let (status, body) = form_call(&format!("https://127.0.0.1:{}/", env.iam_port), "iam",
+                                   &format!("{ak}:{sk}"), &form)?;
     if status != 200 {
         return Err(format!("{} answered {status}:\n{body}", params[0].1));
     }
@@ -3318,8 +3299,7 @@ fn escape_hatch(env: &Env, admin: &str, hint: &str, id: &str) -> Result<(), Stri
 /// untouched, and the abandonment is fixed.
 fn after_the_escape_hatch(env: &Env, admin: &str) -> Result<(), String> {
     let base = format!("http://127.0.0.1:{}", env.rgw_port);
-    /* a listing, not HEAD:  curl -X HEAD waits for a body that is not
-     * coming */
+    /* a listing, whose 404 says the bucket is not served */
     let (status, _) = rgw_call(admin, "GET", &format!("{base}/{DAMAGED_BUCKET}"))?;
     if status != 404 {
         return Err(format!("{DAMAGED_BUCKET} is served after completion ({status});  \
@@ -3536,27 +3516,10 @@ fn start_notify_receiver(env: &Env) -> Result<NotifyReceived, String> {
 /// One signed S3 request as `who`, with headers and a body.
 fn s3_call(who: &str, method: &str, url: &str, headers: &[(&str, &str)], body: Option<&str>)
            -> Result<(u16, String, String), String> {
-    let hdr = std::env::temp_dir().join(format!("standup-notify-{}.hdr", std::process::id()));
-    let mut args: Vec<String> = vec!["-D".into(), hdr.display().to_string(),
-        "-X".into(), method.into(), "--aws-sigv4".into(), "aws:amz:us-east-1:s3".into(),
-        "--user".into(), who.into()];
-    for (k, v) in headers {
-        args.push("-H".into());
-        args.push(format!("{k}: {v}"));
-    }
-    if let Some(b) = body {
-        args.push("--data-binary".into());
-        args.push(b.into());
-    } else if method == "PUT" || method == "POST" {
-        /* curl sends no length without a body, and NooBaa requires one */
-        args.push("-H".into());
-        args.push("Content-Length: 0".into());
-    }
-    args.push(url.into());
-    let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (status, text) = curl(&a)?;
-    let headers = std::fs::read_to_string(&hdr).unwrap_or_default();
-    let _ = std::fs::remove_file(&hdr);
+    let (status, text, got) = signed(method, url, "s3", who, None, headers,
+                                     body.unwrap_or("").as_bytes())?;
+    /* as `header()` reads them, a `name: value` line each */
+    let headers = got.iter().map(|(k, v)| format!("{k}: {v}\n")).collect();
     Ok((status, text, headers))
 }
 
@@ -3833,8 +3796,7 @@ fn poll<T>(secs: u64, mut f: impl FnMut() -> Result<Option<T>, String>)
 /// code if any, and how long it took.
 fn timed_put(who: &str, url: &str) -> Result<(u16, Option<String>, std::time::Duration), String> {
     let t = std::time::Instant::now();
-    let (status, body) = curl(&["-X", "PUT", "--data-binary", "probe",
-                                "--aws-sigv4", "aws:amz:us-east-1:s3", "--user", who, url])?;
+    let (status, body, _) = signed("PUT", url, "s3", who, None, &[], b"probe")?;
     Ok((status, xml_tag(&body, "Code"), t.elapsed()))
 }
 
@@ -3988,23 +3950,35 @@ fn queue_drained(admin: &str, hint: &str, buckets: usize, damaged: bool)
 
 /// One request to the adopted gateway, signed by `who` (`key:secret`).
 fn rgw_call(who: &str, method: &str, url: &str) -> Result<(u16, String), String> {
-    curl(&["-X", method, "--aws-sigv4", "aws:amz:us-east-1:s3", "--user", who, url])
+    signed(method, url, "s3", who, None, &[], b"").map(|(status, body, _)| (status, body))
 }
 
-/// curl, returning the status and the body.
-fn curl(args: &[&str]) -> Result<(u16, String), String> {
-    let out = Command::new("curl")
-        .args(["-s", "-w", "\n%{http_code}"])
-        .args(args)
-        .output()
-        .map_err(|e| format!("cannot run curl: {e}"))?;
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    let (body, code) = text.rsplit_once('\n').unwrap_or(("", &text));
-    let status = code.trim().parse().map_err(|_| {
-        format!("curl {} failed:  {}", args.last().unwrap_or(&""),
-                String::from_utf8_lossy(&out.stderr).trim())
-    })?;
-    Ok((status, body.to_string()))
+/// One SigV4-signed request, as `who` (`key:secret`) with a role
+/// session's `token` where there is one:  the status, the body, and the
+/// response's headers.  The suite's signer, `s3_tests_rs::http::sigv4_request`.
+fn signed(method: &str, url: &str, service: &str, who: &str, token: Option<&str>,
+          headers: &[(&str, &str)], body: &[u8])
+          -> Result<(u16, String, std::collections::HashMap<String, String>), String> {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    let rt = RUNTIME.get_or_init(|| tokio::runtime::Builder::new_current_thread()
+        .enable_all().build().expect("a tokio runtime"));
+    let (access_key, secret_key) = who.split_once(':')
+        .ok_or_else(|| format!("{who:?} is not key:secret"))?;
+    let method = reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|e| format!("{method}: {e}"))?;
+    let key = s3_tests_rs::http::SigV4Key { access_key, secret_key, session_token: token };
+    let r = rt.block_on(s3_tests_rs::http::sigv4_request(method, url, service, &key,
+                                                         headers, body))?;
+    Ok((r.status, r.body, r.headers))
+}
+
+/// An IAM or STS action, its parameters as a form:  the status and body.
+fn form_call(url: &str, service: &str, who: &str, params: &[(&str, &str)])
+             -> Result<(u16, String), String> {
+    let body = s3_tests_rs::http::form_urlencode(params);
+    signed("POST", url, service, who, None,
+           &[("content-type", "application/x-www-form-urlencoded")], body.as_bytes())
+        .map(|(status, body, _)| (status, body))
 }
 
 /// The text of the first `<tag>` at any depth, for the IAM responses.
