@@ -320,7 +320,8 @@ fn partial_run(o: &Opts) -> Vec<String> {
     let mut notes = Vec::new();
     if let Some(g) = &o.gpfs_root {
         notes.push(format!("on GPFS:  every gateway under {}, every conversion tree under the \
-                            work root", g.display()));
+                            work root;  the unimpersonated conversion cells are left out, since \
+                            NooBaa cannot register with GPFS unless it is root", g.display()));
     }
     if let Some(p) = o.preset.filter(|p| p.cells.is_some()) {
         notes.push(format!("preset {}:  {};  this run validates only what it ran",
@@ -335,6 +336,12 @@ fn partial_run(o: &Opts) -> Vec<String> {
             left.join(", ")));
     }
     notes
+}
+
+/// Whether the cell's stand-up runs NooBaa as this user rather than as
+/// root:  a conversion that does not impersonate.
+fn noobaa_unprivileged(c: &Cell) -> bool {
+    c.suites.iter().any(|s| matches!(s, Suite::Conversion { impersonate: false, .. }))
 }
 
 fn on_off(on: bool) -> &'static str {
@@ -495,6 +502,17 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
             _ => {}
         }
         if c.overrides && !o.overrides.contains(&ov) {
+            continue;
+        }
+        /* NooBaa unprivileged cannot register with GPFS (gpfs_ganesha
+         * refuses a process that is not root), so on GPFS a conversion
+         * runs only as an installation does, NooBaa as root:  the
+         * impersonated cells */
+        if o.gpfs_root.is_some() && noobaa_unprivileged(c) {
+            if o.preset.is_none() && o.cells.as_ref().is_some_and(|w| w.contains(&name)) {
+                die(&format!("--cells names {name}, which runs NooBaa unprivileged, and \
+                              NooBaa cannot register with GPFS unless it is root"));
+            }
             continue;
         }
         /* refused before anything starts, rather than failing inside the
