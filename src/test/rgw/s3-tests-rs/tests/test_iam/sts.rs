@@ -8,14 +8,7 @@ use s3_tests_rs::access_model::{Access, Class};
 use s3_tests_rs::admin::{fs_access, FsAccess};
 use s3_tests_rs::config::get_config;
 use s3_tests_rs::fixtures::{get_new_bucket, get_new_bucket_name};
-
-fn require_webidentity(cfg: &s3_tests_rs::config::S3TestConfig) -> (String, String) {
-    let token = cfg.webidentity_token.as_ref()
-        .expect("webidentity not configured — run keycloak-vstart.sh first");
-    let realm = cfg.webidentity_realm.as_ref()
-        .expect("webidentity realm not configured");
-    (token.clone(), realm.clone())
-}
+use s3_tests_rs::webidentity::WebIdRole;
 
 #[tokio::test]
 async fn test_assume_role() {
@@ -369,121 +362,6 @@ async fn test_cross_account_role_get_role() {
     iam_alt.delete_user().user_name(&user_name).send().await.unwrap();
 }
 
-/* The issuer the token names:  the provider RGW looks up, and the
- * prefix of the trust policy's condition keys.  Keycloak 24 issues
- * http://<host>/realms/<realm>, 11 (teuthology's) .../auth/realms/<realm>. */
-fn webidentity_issuer(token: &str) -> String {
-    use base64::Engine;
-    let payload = token.split('.').nth(1).expect("token is not a JWT");
-    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload.trim_end_matches('='))
-        .expect("token payload is not base64url");
-    let claims: serde_json::Value = serde_json::from_slice(&claims)
-        .expect("token payload is not JSON");
-    claims["iss"].as_str().expect("token has no iss").to_string()
-}
-
-/* An OIDC provider for the token's issuer in the [iam root] account,
- * and a role there that trusts it, with `role_policy` */
-struct WebIdRole {
-    role_name: String,
-    role_arn: String,
-    role_id: String,
-    oidc_arn: String,
-}
-
-impl WebIdRole {
-    async fn create(name: &str, client_ids: &[&str], role_policy: &str) -> WebIdRole {
-        let iam = get_iam_root_client();
-        let cfg = get_config();
-        let (token, _) = require_webidentity(&cfg);
-        let path = &cfg.iam_path_prefix;
-        let aud = cfg.webidentity_aud.as_deref().unwrap_or("account");
-
-        let role_name = format!("{}{}", cfg.iam_name_prefix, name);
-        let thumbprint = cfg.webidentity_thumbprint.as_deref().unwrap_or("");
-        let oidc_url = webidentity_issuer(&token);
-        let issuer = oidc_url.trim_start_matches("https://").trim_start_matches("http://");
-
-        /* clean up stale resources from prior interrupted runs */
-        let _ = iam.delete_role_policy().role_name(&role_name)
-            .policy_name("WebIdPolicy").send().await;
-        let _ = iam.delete_role().role_name(&role_name).send().await;
-        if let Ok(providers) = iam.list_open_id_connect_providers().send().await {
-            for p in providers.open_id_connect_provider_list() {
-                if let Some(arn) = p.arn() {
-                    if arn.ends_with(issuer) {
-                        let _ = iam.delete_open_id_connect_provider()
-                            .open_id_connect_provider_arn(arn).send().await;
-                    }
-                }
-            }
-        }
-
-        /* create OIDC provider in RGW */
-        let mut create = iam.create_open_id_connect_provider()
-            .url(&oidc_url)
-            .thumbprint_list(thumbprint);
-        for id in client_ids {
-            create = create.client_id_list(*id);
-        }
-        let oidc_resp = create.send().await.unwrap();
-        let oidc_arn = oidc_resp.open_id_connect_provider_arn().unwrap().to_string();
-
-        /* create role trusting the OIDC provider */
-        let oidc_app_id_key = format!("{}:app_id", issuer);
-        let trust_policy = serde_json::json!({
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Effect": "Allow",
-                "Principal": {"Federated": [&oidc_arn]},
-                "Action": "sts:AssumeRoleWithWebIdentity",
-                "Condition": {"StringEquals": {
-                    &oidc_app_id_key: aud
-                }}
-            }]
-        }).to_string();
-
-        let role = iam.create_role().role_name(&role_name).path(path)
-            .assume_role_policy_document(&trust_policy).send().await.unwrap();
-        let role_arn = role.role().unwrap().arn().to_string();
-        let role_id = role.role().unwrap().role_id().to_string();
-        assert_eq!(role_arn,
-                   format!("arn:aws:iam::{}:role{}{}", cfg.iam_root_user_id, path, role_name));
-
-        iam.put_role_policy().role_name(&role_name).policy_name("WebIdPolicy")
-            .policy_document(role_policy).send().await.unwrap();
-
-        WebIdRole { role_name, role_arn, role_id, oidc_arn }
-    }
-
-    /* an S3 client on a session of the role, from the web identity token */
-    async fn session(&self) -> aws_sdk_s3::Client {
-        let cfg = get_config();
-        let (token, _) = require_webidentity(&cfg);
-        let sts = get_sts_client();
-        let resp = sts.assume_role_with_web_identity()
-            .role_arn(&self.role_arn)
-            .role_session_name("webid-test")
-            .web_identity_token(&token)
-            .send()
-            .await
-            .unwrap();
-        let creds = resp.credentials().unwrap();
-        build_s3_client_with_session_token(
-            creds.access_key_id(), creds.secret_access_key(), creds.session_token())
-    }
-
-    async fn delete(self) {
-        let iam = get_iam_root_client();
-        iam.delete_role_policy().role_name(&self.role_name).policy_name("WebIdPolicy")
-            .send().await.unwrap();
-        iam.delete_role().role_name(&self.role_name).send().await.unwrap();
-        iam.delete_open_id_connect_provider()
-            .open_id_connect_provider_arn(&self.oidc_arn).send().await.unwrap();
-    }
-}
-
 /* AssumeRoleWithWebIdentity against a provider registered with
  * `client_ids`, then a bucket created and deleted with the session's
  * credentials */
@@ -492,7 +370,8 @@ async fn assume_role_with_web_identity(name: &str, client_ids: &[&str]) {
         "Version": "2012-10-17",
         "Statement": {"Effect": "Allow", "Action": "s3:*", "Resource": "arn:aws:s3:::*"}
     }).to_string();
-    let role = WebIdRole::create(name, client_ids, &role_policy).await;
+    let role = WebIdRole::create(&get_iam_root_client(), &get_config().iam_root_user_id,
+                                 name, client_ids, &role_policy).await;
     let s3 = role.session().await;
 
     let bucket = get_new_bucket_name();
@@ -539,7 +418,8 @@ async fn test_cross_account_web_identity_bucket_policy() {
         "Version": "2012-10-17",
         "Statement": {"Effect": "Allow", "Action": "s3:*", "Resource": "arn:aws:s3:::*"}
     }).to_string();
-    let role = WebIdRole::create("WebIdXAcctRole", &[], &role_policy).await;
+    let role = WebIdRole::create(&get_iam_root_client(), &get_config().iam_root_user_id,
+                                 "WebIdXAcctRole", &[], &role_policy).await;
     /* the role principal, as `authenticated_user(s)` renders it for an
      * account with no tenant */
     let principal = format!("$role${}", role.role_id);
