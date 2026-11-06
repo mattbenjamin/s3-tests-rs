@@ -368,15 +368,12 @@ async fn test_cross_account_role_get_role() {
 }
 
 #[tokio::test]
+#[cfg_attr(not(feature = "has_keycloak"), ignore = "requires Keycloak (--features has_keycloak)")]
 async fn test_assume_role_with_web_identity() {
     let _guard = s3_tests_rs::fixtures::TestGuard::setup();
     let iam = get_iam_root_client();
     let cfg = get_config();
-    let token = match cfg.webidentity_token.as_ref() {
-        Some(t) => t.clone(),
-        None => { eprintln!("SKIP: webidentity not configured"); return; }
-    };
-    let realm = cfg.webidentity_realm.as_deref().unwrap_or("demorealm");
+    let (token, realm) = require_webidentity(&cfg);
     let path = &cfg.iam_path_prefix;
     let aud = cfg.webidentity_aud.as_deref().unwrap_or("account");
 
