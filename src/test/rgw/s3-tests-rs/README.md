@@ -338,9 +338,10 @@ cargo nextest run --no-default-features
 | `fails_on_rados` | no | 17 | A filesystem driver's own S3 behaviour, on RGW over RADOS |
 | `fails_on_noobaa` | no | 3 | NooBaa's gateway;  set by `scripts/adoption/standup.rs capture` |
 
-Two features enable tests rather than skipping them:  `rgw_admin`, for
-tests that call Admin Ops endpoints and driver hints, and `has_vault`,
-for a Vault sidecar.  The nsfs gate is `--features fails_on_nsfs,rgw_admin`.
+Three features enable tests rather than skipping them:  `rgw_admin`,
+for tests that call Admin Ops endpoints and driver hints, `has_vault`,
+for a Vault sidecar, and `has_keycloak`, for a Keycloak identity
+provider.  The nsfs gate is `--features fails_on_nsfs,rgw_admin`.
 `STATUS.md` has the counts and how they are taken.
 
 #### nsfs file-as-prefix limitation
@@ -385,7 +386,7 @@ Tests that need them are `#[ignore]`'d with a reason string.
 | Dependency | Required for | # ignored |
 |---|---|---|
 | **KMS (Vault or GKLM)** | SSE-KMS encryption | 9 |
-| **OIDC IdP (Keycloak)** | STS AssumeRoleWithWebIdentity | 0 (not yet translated) |
+| **OIDC IdP (Keycloak)** | STS AssumeRoleWithWebIdentity;  built with `has_keycloak`, against `rgw-vstart.sh --with-keycloak` | 1 |
 | **Kafka broker** | S3/SNS bucket notifications to Kafka;  built with `has_kafka`, run by `validate.rs`'s `kafka` cell | 0 |
 | **Virtual-host DNS** | Virtual-hosted bucket URLs | 0 (not yet translated) |
 | **Bucket logging rollover** | Bucket logging flush/ACL/auth tests | 3 |
