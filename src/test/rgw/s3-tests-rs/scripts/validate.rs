@@ -95,6 +95,12 @@ enum Suite {
     /* the notification tests with `has_kafka`, against the broker the
      * cell's `--with-kafka` started, which is stopped after them */
     Kafka,
+    /* the web identity tests with `has_keycloak` -- profiles `sts` and
+     * `role-identity` -- against the IdP the cell's `--with-keycloak`
+     * started, which is stopped after them.  Its cell reads and writes
+     * a copy of the s3tests.conf, which the IdP's `[webidentity]` is
+     * written into */
+    Keycloak,
     /* `standup.rs conversion`, which starts its own gateway;  `adopt_by`
      * is its setting of that name:  command, automatic or promotion;
      * `kafka` starts kafka-vstart.sh's broker for the `notify` steps'
@@ -137,6 +143,19 @@ const CELLS: &[Cell] = &[
                      Suite::DynamicGroups,
                      Suite::Profile("role-identity")],
            by_default: true },
+    /* the web identity tests against a Keycloak IdP, under each access
+     * model.  Off by default, since the IdP needs podman.  Before `plain`,
+     * as every impersonating cell is:  its --clean removes the fixture
+     * they leave in the data root, which a conversion's stand-up refuses */
+    Cell { name: "keycloak-s3-native", overrides: false,
+           vstart: &["--store", "nsfs", "--with-impersonation",
+                     "--access-model", "s3-native", "--with-keycloak", "--clean"],
+           suites: &[Suite::Keycloak],
+           by_default: false },
+    Cell { name: "keycloak-posix-strict", overrides: false,
+           vstart: &["--store", "nsfs", "--with-impersonation", "--with-keycloak", "--clean"],
+           suites: &[Suite::Keycloak],
+           by_default: false },
     Cell { name: "plain", overrides: true,
            vstart: &["--store", "nsfs", "--bucket-profile", "strong", "--clean",
                      "-o", KAFKA_CONFIG_KEYS],
@@ -197,14 +216,16 @@ struct Preset {
 const PRESETS: &[Preset] = &[
     Preset { name: "quick", cells: Some(&["posix-strict", "plain"]),
              what: "impersonation on and off, the switches and librgw;  both overrides off, no adoption" },
-    /* every value of every dimension once, fresh and adopted;  not every
-     * combination */
+    /* every value of every dimension once, fresh and adopted, and the web
+     * identity tests under each access model;  not every combination */
     Preset { name: "cover",
              cells: Some(&["posix-strict", "s3-native-user", "s3-native-role", "posix-strict-user-role",
                            "plain",
                            "conversion", "conversion-posix-strict-role", "conversion-s3-native-user",
-                           "conversion-user-role", "conversion-promotion"]),
-             what: "every value of every dimension once, fresh and adopted;  not every combination" },
+                           "conversion-user-role", "conversion-promotion",
+                           "keycloak-s3-native", "keycloak-posix-strict"]),
+             what: "every value of every dimension once, fresh and adopted, and the web identity \
+                    tests under each access model;  not every combination" },
     Preset { name: "full", cells: None, what: "every cell" },
 ];
 
@@ -465,12 +486,13 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
         }
         /* refused before anything starts, rather than failing inside the
          * sidecar's start */
-        if c.suites.iter().any(|s| matches!(s, Suite::Kafka))
+        if c.suites.iter().any(|s| matches!(s, Suite::Kafka | Suite::Keycloak))
             && !Command::new("podman").arg("--version").stdout(Stdio::null())
                 .stderr(Stdio::null()).status().is_ok_and(|st| st.success()) {
-            die(&format!("the {} cell runs a Kafka broker in a container, and \
+            die(&format!("the {} cell runs a sidecar in a container, and \
                           podman is not installed", c.name));
         }
+        let keycloak = c.suites.iter().any(|s| matches!(s, Suite::Keycloak));
         /* a conversion's gateway is started with --with-lifecycle already */
         let variants = if o.lifecycle && !c.vstart.is_empty() { &[false, true][..] }
                        else { &[false][..] };
@@ -489,20 +511,32 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
                 argv.push("--role-identity-override".into());
             }
             let first = steps.len();
+            /* the IdP's cells read their own copy, never the one named */
+            let conf = if keycloak { run_dir.join(&cell).join("s3tests.conf") }
+                       else { o.conf.clone() };
+            if keycloak {
+                steps.push(step(&cell, "conf", b, s(&["sh", "-c",
+                    "mkdir -p \"$(dirname \"$2\")\" && cp \"$1\" \"$2\"",
+                    "sh", &o.conf.to_string_lossy(), &conf.to_string_lossy()])));
+            }
             if !c.vstart.is_empty() {
-                steps.push(step(&cell, "vstart", b, argv));
+                let mut st = step(&cell, "vstart", b, argv);
+                if keycloak {
+                    st.env.push(("S3TEST_CONF".into(), conf.to_string_lossy().into()));
+                }
+                steps.push(st);
             }
             if let Some(expr) = &o.test {
                 let mut st = step(&cell, "test", suite_dir, s(&["cargo", "nextest", "run",
                     "--no-fail-fast", "--features", FEATURES, "-E", expr]));
-                st.env.push(("S3TEST_CONF".into(), o.conf.to_string_lossy().into()));
+                st.env.push(("S3TEST_CONF".into(), conf.to_string_lossy().into()));
                 st.parallel_log = true;
                 steps.push(st);
             }
             for suite in c.suites {
                 match suite {
                     Suite::Profile(_) | Suite::Conversion { .. } | Suite::DynamicGroups
-                    | Suite::Kafka
+                    | Suite::Kafka | Suite::Keycloak
                         if o.test.is_some() => {}
                     Suite::Librgw if !o.librgw => {}
                     Suite::Conversion { impersonate, access_model, adopt_by, kafka } => {
@@ -551,7 +585,7 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
                     Suite::Profile(p) => {
                         let mut st = step(&cell, p, suite_dir, s(&["cargo", "nextest", "run",
                             "-P", p, "--no-fail-fast", "--features", FEATURES]));
-                        st.env.push(("S3TEST_CONF".into(), o.conf.to_string_lossy().into()));
+                        st.env.push(("S3TEST_CONF".into(), conf.to_string_lossy().into()));
                         st.parallel_log = true;
                         steps.push(st);
                     }
@@ -570,7 +604,7 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
                         ] {
                             let mut st = step(&cell, name, suite_dir, argv);
                             if name.starts_with("dynamic-groups") {
-                                st.env.push(("S3TEST_CONF".into(), o.conf.to_string_lossy().into()));
+                                st.env.push(("S3TEST_CONF".into(), conf.to_string_lossy().into()));
                                 st.parallel_log = true;
                             }
                             steps.push(st);
@@ -580,7 +614,7 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
                         let mut st = step(&cell, "kafka", suite_dir, s(&["cargo", "nextest", "run",
                             "--no-fail-fast", "--features", &format!("{FEATURES},has_kafka"),
                             "-E", "binary(test_sns)"]));
-                        st.env.push(("S3TEST_CONF".into(), o.conf.to_string_lossy().into()));
+                        st.env.push(("S3TEST_CONF".into(), conf.to_string_lossy().into()));
                         st.parallel_log = true;
                         steps.push(st);
                         /* run whatever the tests returned:  the broker is a
@@ -588,6 +622,20 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
                          * one rgw-vstart.sh started */
                         steps.push(step(&cell, "kafka-stop", b, vec![
                             o.source_dir.join("src/script/rgw/kafka-vstart.sh")
+                                .to_string_lossy().into_owned(), "--stop".into()]));
+                    }
+                    Suite::Keycloak => {
+                        for p in ["sts", "role-identity"] {
+                            let mut st = step(&cell, p, suite_dir, s(&["cargo", "nextest", "run",
+                                "-P", p, "--no-fail-fast", "--features",
+                                &format!("{FEATURES},has_keycloak")]));
+                            st.env.push(("S3TEST_CONF".into(), conf.to_string_lossy().into()));
+                            st.parallel_log = true;
+                            steps.push(st);
+                        }
+                        /* run whatever the tests returned, as for Kafka */
+                        steps.push(step(&cell, "keycloak-stop", b, vec![
+                            o.source_dir.join("src/script/rgw/keycloak-vstart.sh")
                                 .to_string_lossy().into_owned(), "--stop".into()]));
                     }
                     Suite::Librgw => {

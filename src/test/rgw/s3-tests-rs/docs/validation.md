@@ -72,8 +72,14 @@ of the two overrides, make 24 deployments;  four more follow the table:
 | `conversion-promotion` | the stand-up, switched to `automatic` by the `adoption` hint | the adoption corpus, and the promotion checks |
 | `kafka` | not impersonated, `--with-kafka` | `test_sns` built with `has_kafka`, against the broker it starts;  needs podman |
 | `conversion-kafka` | the stand-up, with `kafka-vstart.sh`'s broker | the adoption corpus, and the `notify` steps' Kafka half;  needs podman |
+| `keycloak-s3-native` | impersonated, `s3-native`, `--with-keycloak` | profiles `sts` and `role-identity` built with `has_keycloak`:  the web identity tests against the IdP it starts, which is stopped after;  needs podman |
+| `keycloak-posix-strict` | impersonated, `posix-strict`, `--with-keycloak` | the same |
 
-The four run only when `--cells` or `--preset full` names them.  The deployments other
+The six run only when `--cells` or a preset names them:  `cover` names
+the two `keycloak` cells, and `full` all six.  A `keycloak` cell copies
+the s3tests.conf into its run directory, and its gateway, IdP and tests
+use the copy:  the IdP's `[webidentity]` section is written there, never
+into the file named.  The deployments other
 than `plain` run with the default bucket profile, `shared`.
 
 ### 2.  Switches tested inside a deployment
@@ -210,7 +216,7 @@ either says it validates only what it ran:
 | preset | deployments | covers |
 |---|---|---|
 | `quick` | `posix-strict`, `plain` | impersonation on and off, the switches, librgw;  both overrides off, no adoption |
-| `cover` | `posix-strict`, `s3-native-user`, `s3-native-role`, `posix-strict-user-role`, `plain`, `conversion`, `conversion-posix-strict-role`, `conversion-s3-native-user`, `conversion-user-role`, `conversion-promotion` | every value of every dimension at least once, fresh and adopted;  not every combination |
+| `cover` | `posix-strict`, `s3-native-user`, `s3-native-role`, `posix-strict-user-role`, `plain`, `conversion`, `conversion-posix-strict-role`, `conversion-s3-native-user`, `conversion-user-role`, `conversion-promotion`, `keycloak-s3-native`, `keycloak-posix-strict` | every value of every dimension at least once, fresh and adopted, and the web identity tests under each access model;  not every combination |
 
 `--overrides` picks which of the four override settings the crossing
 deployments run -- `off`, `user`, `role`, `user-role`, all four by
