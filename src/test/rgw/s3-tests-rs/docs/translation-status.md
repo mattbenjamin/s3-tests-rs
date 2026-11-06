@@ -70,7 +70,7 @@ CORS presigned URLs, stress tests, and encryption size variants.
 | tagging | 16 | 0 | Bucket/object tags, max kv, multipart tagging, head tag count |
 | stress | 2 | 3 | Bucket cache stress, concurrent put/delete/list (run manually) |
 
-### test_iam — 102 tests (6 modules)
+### test_iam — 119 tests (7 modules)
 
 | Module | Tests | Ignored | Coverage |
 |--------|------:|--------:|----------|
@@ -80,6 +80,7 @@ CORS presigned URLs, stress tests, and encryption size variants.
 | group | 8 | 0 | Group CRUD, membership, policy |
 | sts | 35 | 0 | AssumeRole, cross-account;  WebIdentity, session policies and ABAC, with `has_keycloak` |
 | oidc | 5 | 0 | OIDC provider CRUD |
+| cross_account | 17 | 0 | Another account's principal, by bucket policy and ACL grants |
 
 ### test_rgw — 5 tests
 
@@ -110,9 +111,9 @@ and KMS test restructuring).
 
 ### test_iam.py — 90 Python tests
 
-- **65** exact name matches
-- **25** unported (cross-account ACL/policy (17), account roles (4),
-  account summary (2), other (2))
+- **82** exact name matches, the 17 cross-account ACL and policy tests
+  among them
+- **8** unported (account roles (4), account summary (2), other (2))
 - **8** Rust-only (group CRUD, additional OIDC tests)
 
 ### test_headers.py — 48 Python tests
@@ -162,11 +163,10 @@ and KMS test restructuring).
 | Usage / stats | 1 | `test_head_bucket_extended` (x-rgw-object-count header) |
 | Other | 6 | `test_object_copy_versioning_multipart_upload`, `test_object_requestid_matches_header_on_error`, `test_ranged_request_*_response_code` (2), `test_read_through`, `test_bucket_head_extended` |
 
-### test_iam.py (25 tests)
+### test_iam.py (8 tests)
 
-Cross-account bucket ACL/policy tests (17), account role tests (4),
-account summary (2), `test_verify_allow_iam_actions` (1),
-`test_same_account_role_policy_allow` (1).
+Account role tests (4), account summary (2),
+`test_verify_allow_iam_actions` (1), `test_same_account_role_policy_allow` (1).
 
 ### test_headers.py (27 tests)
 
@@ -186,11 +186,11 @@ Entire module — requires S3 Select support on the backend.
 | Source | Total | Ported | Unported |
 |--------|------:|-------:|---------:|
 | test_s3.py | 752 | 655 | 97 |
-| test_iam.py | 90 | 65 | 25 |
+| test_iam.py | 90 | 82 | 8 |
 | test_headers.py | 48 | 21 | 27 |
 | test_sts.py | 37 | 28 | 9 |
 | test_s3select.py | 38 | 0 | 38 |
-| **Total** | **965** | **769** | **196** |
+| **Total** | **965** | **786** | **179** |
 
 ## Unported from Ceph-Tree Suites
 
