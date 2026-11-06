@@ -120,7 +120,7 @@ there.
 | non-md5 etag | `--with-non-md5-etag` | `non_md5_etag` |
 | rename disabled | `-o rgw_nsfs_enable_rename=false` | `can_rename`, `rename_enabled` |
 | the io_uring engine | `-o rgw_nsfs_io_engine=io_uring`;  the default is `sync` | -- |
-| GPFS | `--gpfs`, with `--clone` and `--lwe` for clone and locking, on a GPFS filesystem | `strategy`, `shares_extents` |
+| GPFS | `--gpfs`, with `--clone` and `--lwe` for clone and locking, on a GPFS filesystem;  `validate.rs`'s `gpfs_root` runs every deployment on it | `strategy`, `shares_extents` |
 | fast lifecycle | `--with-lifecycle`, or `validate.rs --lifecycle`;  the lifecycle tests run in their own profile | `lc_threads`, `lc_debug_interval` |
 | inotify | `--with-inotify` | -- |
 | automatic adoption | `--adoption-mode automatic`;  the stand-up runs `command` | -- |
@@ -163,6 +163,8 @@ noobaa_src     = /path/to/noobaa-core
 work_root      = /path/to/work
 # optional:  every suite's output appended to one file
 parallel_log   = /tmp/s3test-parallel.log
+# optional:  run on GPFS
+gpfs_root      = /gpfs/fs1/nsfs
 ```
 
 | key | option | what it is | needed |
@@ -173,6 +175,7 @@ parallel_log   = /tmp/s3test-parallel.log
 | `noobaa_src` | `--noobaa-src DIR` | your noobaa-core clone, read only | for a conversion deployment |
 | `work_root` | `--work-root DIR` | where the conversion deployments' work directories go;  every user must be able to search it | for an impersonated conversion deployment whose run directory is not reachable |
 | `parallel_log` | `--parallel-log FILE` | every suite's output, appended | never |
+| `gpfs_root` | `--gpfs-root DIR` | a directory on GPFS:  every deployment's gateway is started there, `rgw-vstart.sh --gpfs --gpfs-root DIR` | to run on GPFS |
 
 An option overrides the file.  A key that is needed and missing is
 refused, naming the key and the file;  an unknown key is refused too,
@@ -180,6 +183,15 @@ so a misspelling is not silently ignored.  Without `work_root` the
 work directories go under the run directory, `target/validate/` in the
 suite, which is fine when the checkout is somewhere every user can
 search and refused before anything starts when it is not.
+
+**On GPFS** (`gpfs_root`), the filesystem is the host's, not a
+deployment's:  every deployment's gateway puts its data root, LMDB and
+userdb under `gpfs_root`, and a conversion deployment's tree is under
+its work directory, so `work_root` has to be on GPFS too.  Both are
+checked (`stat -f`) before anything starts, since a run that fell back
+to a local filesystem would validate that filesystem again;  the run's
+notes name GPFS.  The driver finds GPFS from the filesystem itself:  the
+gateway's log says `rgw-strided` for its multipart layout.
 
 **The adoption cache is built once,** by the stand-up's first four
 steps with `ADOPTION_WORK` set to the cache directory.  It then holds
