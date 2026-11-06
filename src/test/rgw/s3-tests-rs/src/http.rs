@@ -196,6 +196,109 @@ pub async fn signed_request_with_creds(
     }
 }
 
+/// The key a SigV4 request is signed with:  an access key and secret,
+/// and the session token of a role session.
+pub struct SigV4Key<'a> {
+    pub access_key: &'a str,
+    pub secret_key: &'a str,
+    pub session_token: Option<&'a str>,
+}
+
+/// A SigV4-signed request to any endpoint, for `service` (`s3`, `iam`,
+/// `sts`), carrying `headers` and `body`:  for a driver that talks to a
+/// gateway `s3tests.conf` does not name, such as the adoption stand-up's
+/// NooBaa.  The `Host` signed is the one sent, port included.
+/// Certificates are not checked, as for every request here.
+pub async fn sigv4_request(
+    method: reqwest::Method,
+    url: &str,
+    service: &str,
+    key: &SigV4Key<'_>,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<RawResponse, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
+    let host = match (parsed.host_str(), parsed.port()) {
+        (Some(h), Some(p)) => format!("{h}:{p}"),
+        (Some(h), None) => h.to_string(),
+        (None, _) => return Err(format!("{url} names no host")),
+    };
+
+    let credentials = Credentials::new(key.access_key, key.secret_key,
+                                       key.session_token.map(str::to_string), None,
+                                       "s3-tests-rs");
+    let identity: Identity = credentials.into();
+    let mut settings = SigningSettings::default();
+    settings.payload_checksum_kind =
+        aws_sigv4::http_request::PayloadChecksumKind::XAmzSha256;
+    let signing_params = SigningParams::builder()
+        .identity(&identity)
+        .region("us-east-1")
+        .name(service)
+        .time(SystemTime::now())
+        .settings(settings)
+        .build()
+        .map_err(|e| format!("signing parameters: {e}"))?;
+
+    let mut signed_headers = vec![("host", host.as_str())];
+    signed_headers.extend(headers.iter().copied());
+    let signable_request = SignableRequest::new(
+        method.as_str(),
+        url,
+        signed_headers.into_iter(),
+        SignableBody::Bytes(body),
+    )
+    .map_err(|e| format!("signable request: {e}"))?;
+    let (instructions, _signature) = sign(signable_request, &signing_params.into())
+        .map_err(|e| format!("signing: {e}"))?
+        .into_parts();
+
+    let mut req = build_reqwest_client().request(method, url).header("host", &host);
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    for (name, value) in instructions.headers() {
+        req = req.header(name, value);
+    }
+    /* NooBaa refuses a PUT or POST without a length (411), and an empty
+     * body is sent without one unless it is said */
+    if body.is_empty() {
+        req = req.header("content-length", "0");
+    }
+    let resp = req.body(body.to_vec()).send().await.map_err(|e| format!("{url}: {e}"))?;
+    let status = resp.status().as_u16();
+    let mut resp_headers = HashMap::new();
+    for (k, v) in resp.headers() {
+        resp_headers.insert(
+            k.as_str().to_lowercase(),
+            v.to_str().unwrap_or_default().to_string(),
+        );
+    }
+    let resp_body = resp.text().await.unwrap_or_default();
+    Ok(RawResponse {
+        status,
+        headers: resp_headers,
+        body: resp_body,
+        final_url: None,
+    })
+}
+
+/// `application/x-www-form-urlencoded`, as an IAM or STS action's body.
+pub fn form_urlencode(params: &[(&str, &str)]) -> String {
+    let enc = |v: &str| {
+        let mut out = String::with_capacity(v.len());
+        for b in v.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' =>
+                    out.push(b as char),
+                _ => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
+    };
+    params.iter().map(|(k, v)| format!("{}={}", enc(k), enc(v))).collect::<Vec<_>>().join("&")
+}
+
 /// Captures HTTP response headers and body from an SDK call.
 ///
 /// Attach to any SDK operation via `.customize().interceptor(capture.clone())`.
@@ -754,4 +857,53 @@ pub fn zero_content_length(
     req: &mut aws_smithy_runtime_api::client::orchestrator::HttpRequest,
 ) {
     req.headers_mut().insert("content-length", "0");
+}
+
+#[cfg(test)]
+mod sigv4_request_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /* What sigv4_request sends for `body`, read off a local socket that
+     * answers 200 */
+    fn request_sent(body: &'static [u8]) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut buf).unwrap();
+                if n == 0 { break; }
+                got.extend_from_slice(&buf[..n]);
+            }
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").unwrap();
+            String::from_utf8_lossy(&got).to_lowercase()
+        });
+        let key = SigV4Key { access_key: "AK", secret_key: "SK", session_token: None };
+        let url = format!("http://127.0.0.1:{port}/bucket");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let r = rt.block_on(sigv4_request(reqwest::Method::PUT, &url, "s3", &key, &[], body))
+            .unwrap();
+        assert_eq!(r.status, 200);
+        server.join().unwrap()
+    }
+
+    /* a PUT with no body says its length, which NooBaa requires */
+    #[test]
+    fn an_empty_put_says_content_length_zero() {
+        let req = request_sent(b"");
+        assert!(req.contains("content-length: 0\r\n"), "{req}");
+    }
+
+    /* the Host signed is the one sent, port included */
+    #[test]
+    fn the_host_signed_carries_the_port() {
+        let req = request_sent(b"x");
+        let host = req.lines().find(|l| l.starts_with("host: ")).unwrap().to_string();
+        assert!(host.contains(":"), "{host}");
+        assert!(req.contains("signedheaders=host;"), "{req}");
+    }
 }
