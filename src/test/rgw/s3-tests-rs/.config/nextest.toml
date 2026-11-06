@@ -34,6 +34,12 @@ max-threads = 1
 [test-groups.serial-nsfs-identity]
 max-threads = 1
 
+# Every profile applies the default profile's overrides after its own,
+# so a per-module profile or a bare -E serializes IAM as baseline does.
+[[profile.default.overrides]]
+filter = 'test(user_policy::) | test(role::) | test(oidc::) | test(/^sts::/) | test(group::) | test(user::)'
+test-group = 'serial-iam'
+
 # --- Per-module profiles ---
 
 [profile.bucket-list]
@@ -91,10 +97,10 @@ default-filter = 'test(signing::)'
 default-filter = 'test(stress::)'
 
 [profile.iam]
-default-filter = 'test(user_policy::) | test(role::) | test(oidc::) | test(sts::) | test(group::) | test(user::)'
+default-filter = 'test(user_policy::) | test(role::) | test(oidc::) | test(/^sts::/) | test(group::) | test(user::)'
 
 [[profile.iam.overrides]]
-filter = 'test(user_policy::) | test(role::) | test(oidc::) | test(sts::) | test(group::) | test(user::)'
+filter = 'test(user_policy::) | test(role::) | test(oidc::) | test(/^sts::/) | test(group::) | test(user::)'
 test-group = 'serial-iam'
 
 [profile.role]
@@ -104,7 +110,7 @@ default-filter = 'test(role::)'
 default-filter = 'test(oidc::)'
 
 [profile.sts]
-default-filter = 'test(sts::)'
+default-filter = 'test(/^sts::/)'
 
 # --- Composite profiles ---
 
@@ -119,7 +125,7 @@ test-threads = 8
 default-filter = 'all() & !test(lifecycle::) & !test(bucket_logging::) & !test(stress::) & !test(=impersonation::test_data_follows_the_access_model) & !test(dynamic_groups::) & !test(role_identity::)'
 
 [[profile.baseline.overrides]]
-filter = 'test(user_policy::) | test(role::) | test(oidc::) | test(sts::) | test(group::) | test(user::)'
+filter = 'test(user_policy::) | test(role::) | test(oidc::) | test(/^sts::/) | test(group::) | test(user::)'
 test-group = 'serial-iam'
 
 [[profile.baseline.overrides]]
@@ -164,7 +170,7 @@ default-filter = 'test(bucket_list::) | test(object_ops::) | test(copy::) | test
 default-filter = 'all()'
 
 [[profile.all.overrides]]
-filter = 'test(user_policy::) | test(role::) | test(oidc::) | test(sts::) | test(group::) | test(user::)'
+filter = 'test(user_policy::) | test(role::) | test(oidc::) | test(/^sts::/) | test(group::) | test(user::)'
 test-group = 'serial-iam'
 
 [[profile.all.overrides]]
