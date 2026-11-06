@@ -27,7 +27,7 @@ use s3_tests_rs::client::{build_s3_client, build_s3_client_with_session_token,
 use s3_tests_rs::config::get_config;
 use s3_tests_rs::features::features;
 use s3_tests_rs::fixtures::{get_new_bucket_name, PrivateAccount, TestGuard};
-use s3_tests_rs::webidentity::WebIdRole;
+use s3_tests_rs::webidentity::{webidentity_aud, WebIdRole};
 
 const UID_ACCOUNT: &str = "70109";
 const UID_ROLE: &str = "70110";
@@ -271,7 +271,8 @@ async fn test_a_web_identity_sessions_object_is_the_identity_it_was_given() {
     };
 
     let all = r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":"*","Resource":"*"}}"#;
-    let role = WebIdRole::create(&acct.root, &acct.id, "WebIdOv", &[], all).await;
+    let aud = webidentity_aud(&cfg);
+    let role = WebIdRole::create(&acct.root, &acct.id, "WebIdOv", &[], "app_id", &aud, Some(all)).await;
 
     /* the account's row, and the role's */
     for (p, uid) in [(("identity", acct.id.as_str()), UID_ACCOUNT),

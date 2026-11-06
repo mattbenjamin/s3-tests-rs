@@ -82,7 +82,7 @@ gate, and may carry several.
 | `fails_on_noobaa` | 3 | NooBaa, for a capture from their gateway |
 | `rgw_admin` | 68 | **requires** the feature — Admin Ops endpoints and driver hints |
 | `has_vault` | 22 | **requires** a Vault sidecar |
-| `has_keycloak` | 4 | **requires** an OIDC identity provider, `rgw-vstart.sh --with-keycloak` |
+| `has_keycloak` | 31 | **requires** an OIDC identity provider, `rgw-vstart.sh --with-keycloak` |
 
 The `fails_on_*` gates are permanent annotations, not a to-do list:
 the suite is meant to run against implementations it cannot

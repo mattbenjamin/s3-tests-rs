@@ -70,7 +70,7 @@ CORS presigned URLs, stress tests, and encryption size variants.
 | tagging | 16 | 0 | Bucket/object tags, max kv, multipart tagging, head tag count |
 | stress | 2 | 3 | Bucket cache stress, concurrent put/delete/list (run manually) |
 
-### test_iam — 73 tests (6 modules)
+### test_iam — 102 tests (6 modules)
 
 | Module | Tests | Ignored | Coverage |
 |--------|------:|--------:|----------|
@@ -78,7 +78,7 @@ CORS presigned URLs, stress tests, and encryption size variants.
 | user | 18 | 0 | User CRUD, path, boundary conditions |
 | role | 10 | 0 | Role CRUD, assume-role policy |
 | group | 8 | 0 | Group CRUD, membership, policy |
-| sts | 6 | 0 | AssumeRole, cross-account, WebIdentity (Keycloak) |
+| sts | 35 | 0 | AssumeRole, cross-account;  WebIdentity, session policies and ABAC, with `has_keycloak` |
 | oidc | 5 | 0 | OIDC provider CRUD |
 
 ### test_rgw — 5 tests
@@ -121,10 +121,17 @@ and KMS test restructuring).
 
 ### test_sts.py — 37 Python tests
 
-- **1** exact match (`test_assume_role_with_web_identity`)
-- **36** unported (session policies (12), WebIdentity tag variants (11),
-  GetCallerIdentity (3), assume-role allow/deny/expiry (5), other (5))
-- **5** Rust-only (cross-account role tests structured differently)
+- **28** ported:  the 27 `webidentity_test` tests (the WebIdentity basics,
+  session policies (12) and ABAC (12)), and
+  `test_assume_role_with_web_identity_invalid_webtoken`, which is disabled
+  there (inside a string), as an addition
+- **9** unported, none needing an IdP:  `test_get_session_token`,
+  `test_assume_role_{allow,deny,creds_expiry}`,
+  `test_assume_role_{allow,deny}_head_nonexistent`, and
+  `test_get_caller_identity_{root,non_root_user,after_assume_role}`
+- **7** Rust-only:  the cross-account role tests, structured differently
+  (5);  `test_assume_role_with_web_identity_client_id`, a provider registered
+  with the token's audience;  `test_cross_account_web_identity_bucket_policy`
 
 ### test_s3select.py — 38 Python tests
 
@@ -165,10 +172,10 @@ account summary (2), `test_verify_allow_iam_actions` (1),
 
 Remaining SigV2 header validation edge cases.
 
-### test_sts.py (36 tests)
+### test_sts.py (9 tests)
 
-Session policy tests (12), WebIdentity tag/resource variants (11),
-GetCallerIdentity (3), assume-role allow/deny/expiry (5), other (5).
+GetSessionToken (1), AssumeRole allow/deny/expiry and HEAD of a missing
+object (5), GetCallerIdentity (3).
 
 ### test_s3select.py (38 tests)
 
@@ -181,9 +188,9 @@ Entire module — requires S3 Select support on the backend.
 | test_s3.py | 752 | 655 | 97 |
 | test_iam.py | 90 | 65 | 25 |
 | test_headers.py | 48 | 21 | 27 |
-| test_sts.py | 37 | 1 | 36 |
+| test_sts.py | 37 | 28 | 9 |
 | test_s3select.py | 38 | 0 | 38 |
-| **Total** | **965** | **742** | **223** |
+| **Total** | **965** | **769** | **196** |
 
 ## Unported from Ceph-Tree Suites
 
