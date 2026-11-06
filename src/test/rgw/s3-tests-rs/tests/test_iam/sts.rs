@@ -4,6 +4,8 @@ use s3_tests_rs::client::{
     build_sts_client, get_iam_alt_root_client, get_iam_alt_root_s3client,
     get_iam_root_client, get_iam_root_s3client, get_sts_client,
 };
+use s3_tests_rs::access_model::{Access, Class};
+use s3_tests_rs::admin::{fs_access, FsAccess};
 use s3_tests_rs::config::get_config;
 use s3_tests_rs::fixtures::{get_new_bucket, get_new_bucket_name};
 
@@ -381,96 +383,123 @@ fn webidentity_issuer(token: &str) -> String {
     claims["iss"].as_str().expect("token has no iss").to_string()
 }
 
+/* An OIDC provider for the token's issuer in the [iam root] account,
+ * and a role there that trusts it, with `role_policy` */
+struct WebIdRole {
+    role_name: String,
+    role_arn: String,
+    role_id: String,
+    oidc_arn: String,
+}
+
+impl WebIdRole {
+    async fn create(name: &str, client_ids: &[&str], role_policy: &str) -> WebIdRole {
+        let iam = get_iam_root_client();
+        let cfg = get_config();
+        let (token, _) = require_webidentity(&cfg);
+        let path = &cfg.iam_path_prefix;
+        let aud = cfg.webidentity_aud.as_deref().unwrap_or("account");
+
+        let role_name = format!("{}{}", cfg.iam_name_prefix, name);
+        let thumbprint = cfg.webidentity_thumbprint.as_deref().unwrap_or("");
+        let oidc_url = webidentity_issuer(&token);
+        let issuer = oidc_url.trim_start_matches("https://").trim_start_matches("http://");
+
+        /* clean up stale resources from prior interrupted runs */
+        let _ = iam.delete_role_policy().role_name(&role_name)
+            .policy_name("WebIdPolicy").send().await;
+        let _ = iam.delete_role().role_name(&role_name).send().await;
+        if let Ok(providers) = iam.list_open_id_connect_providers().send().await {
+            for p in providers.open_id_connect_provider_list() {
+                if let Some(arn) = p.arn() {
+                    if arn.ends_with(issuer) {
+                        let _ = iam.delete_open_id_connect_provider()
+                            .open_id_connect_provider_arn(arn).send().await;
+                    }
+                }
+            }
+        }
+
+        /* create OIDC provider in RGW */
+        let mut create = iam.create_open_id_connect_provider()
+            .url(&oidc_url)
+            .thumbprint_list(thumbprint);
+        for id in client_ids {
+            create = create.client_id_list(*id);
+        }
+        let oidc_resp = create.send().await.unwrap();
+        let oidc_arn = oidc_resp.open_id_connect_provider_arn().unwrap().to_string();
+
+        /* create role trusting the OIDC provider */
+        let oidc_app_id_key = format!("{}:app_id", issuer);
+        let trust_policy = serde_json::json!({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {"Federated": [&oidc_arn]},
+                "Action": "sts:AssumeRoleWithWebIdentity",
+                "Condition": {"StringEquals": {
+                    &oidc_app_id_key: aud
+                }}
+            }]
+        }).to_string();
+
+        let role = iam.create_role().role_name(&role_name).path(path)
+            .assume_role_policy_document(&trust_policy).send().await.unwrap();
+        let role_arn = role.role().unwrap().arn().to_string();
+        let role_id = role.role().unwrap().role_id().to_string();
+        assert_eq!(role_arn,
+                   format!("arn:aws:iam::{}:role{}{}", cfg.iam_root_user_id, path, role_name));
+
+        iam.put_role_policy().role_name(&role_name).policy_name("WebIdPolicy")
+            .policy_document(role_policy).send().await.unwrap();
+
+        WebIdRole { role_name, role_arn, role_id, oidc_arn }
+    }
+
+    /* an S3 client on a session of the role, from the web identity token */
+    async fn session(&self) -> aws_sdk_s3::Client {
+        let cfg = get_config();
+        let (token, _) = require_webidentity(&cfg);
+        let sts = get_sts_client();
+        let resp = sts.assume_role_with_web_identity()
+            .role_arn(&self.role_arn)
+            .role_session_name("webid-test")
+            .web_identity_token(&token)
+            .send()
+            .await
+            .unwrap();
+        let creds = resp.credentials().unwrap();
+        build_s3_client_with_session_token(
+            creds.access_key_id(), creds.secret_access_key(), creds.session_token())
+    }
+
+    async fn delete(self) {
+        let iam = get_iam_root_client();
+        iam.delete_role_policy().role_name(&self.role_name).policy_name("WebIdPolicy")
+            .send().await.unwrap();
+        iam.delete_role().role_name(&self.role_name).send().await.unwrap();
+        iam.delete_open_id_connect_provider()
+            .open_id_connect_provider_arn(&self.oidc_arn).send().await.unwrap();
+    }
+}
+
 /* AssumeRoleWithWebIdentity against a provider registered with
  * `client_ids`, then a bucket created and deleted with the session's
  * credentials */
 async fn assume_role_with_web_identity(name: &str, client_ids: &[&str]) {
-    let iam = get_iam_root_client();
-    let cfg = get_config();
-    let (token, _) = require_webidentity(&cfg);
-    let path = &cfg.iam_path_prefix;
-    let aud = cfg.webidentity_aud.as_deref().unwrap_or("account");
-
-    let role_name = format!("{}{}", cfg.iam_name_prefix, name);
-    let thumbprint = cfg.webidentity_thumbprint.as_deref().unwrap_or("");
-    let oidc_url = webidentity_issuer(&token);
-    let issuer = oidc_url.trim_start_matches("https://").trim_start_matches("http://");
-
-    /* clean up stale resources from prior interrupted runs */
-    let _ = iam.delete_role_policy().role_name(&role_name)
-        .policy_name("S3Full").send().await;
-    let _ = iam.delete_role().role_name(&role_name).send().await;
-    if let Ok(providers) = iam.list_open_id_connect_providers().send().await {
-        for p in providers.open_id_connect_provider_list() {
-            if let Some(arn) = p.arn() {
-                if arn.ends_with(issuer) {
-                    let _ = iam.delete_open_id_connect_provider()
-                        .open_id_connect_provider_arn(arn).send().await;
-                }
-            }
-        }
-    }
-
-    /* create OIDC provider in RGW */
-    let mut create = iam.create_open_id_connect_provider()
-        .url(&oidc_url)
-        .thumbprint_list(thumbprint);
-    for id in client_ids {
-        create = create.client_id_list(*id);
-    }
-    let oidc_resp = create.send().await.unwrap();
-    let oidc_arn = oidc_resp.open_id_connect_provider_arn().unwrap().to_string();
-
-    /* create role trusting the OIDC provider */
-    let oidc_app_id_key = format!("{}:app_id", issuer);
-    let trust_policy = serde_json::json!({
-        "Version": "2012-10-17",
-        "Statement": [{
-            "Effect": "Allow",
-            "Principal": {"Federated": [&oidc_arn]},
-            "Action": "sts:AssumeRoleWithWebIdentity",
-            "Condition": {"StringEquals": {
-                &oidc_app_id_key: aud
-            }}
-        }]
-    }).to_string();
-
-    let role = iam.create_role().role_name(&role_name).path(path)
-        .assume_role_policy_document(&trust_policy).send().await.unwrap();
-    let role_arn = role.role().unwrap().arn().to_string();
-    assert_eq!(role_arn,
-               format!("arn:aws:iam::{}:role{}{}", cfg.iam_root_user_id, path, role_name));
-
     let role_policy = serde_json::json!({
         "Version": "2012-10-17",
         "Statement": {"Effect": "Allow", "Action": "s3:*", "Resource": "arn:aws:s3:::*"}
     }).to_string();
-    iam.put_role_policy().role_name(&role_name).policy_name("S3Full")
-        .policy_document(&role_policy).send().await.unwrap();
-
-    /* assume role with web identity token */
-    let sts = get_sts_client();
-    let resp = sts.assume_role_with_web_identity()
-        .role_arn(&role_arn)
-        .role_session_name("webid-test")
-        .web_identity_token(&token)
-        .send()
-        .await
-        .unwrap();
-
-    let creds = resp.credentials().unwrap();
-    let s3 = build_s3_client_with_session_token(
-        creds.access_key_id(), creds.secret_access_key(), creds.session_token());
+    let role = WebIdRole::create(name, client_ids, &role_policy).await;
+    let s3 = role.session().await;
 
     let bucket = get_new_bucket_name();
     s3.create_bucket().bucket(&bucket).send().await.unwrap();
     s3.delete_bucket().bucket(&bucket).send().await.unwrap();
 
-    /* clean up */
-    iam.delete_role_policy().role_name(&role_name).policy_name("S3Full").send().await.unwrap();
-    iam.delete_role().role_name(&role_name).send().await.unwrap();
-    iam.delete_open_id_connect_provider()
-        .open_id_connect_provider_arn(&oidc_arn).send().await.unwrap();
+    role.delete().await;
 }
 
 /* A provider registered with no client IDs, as test_sts.py's:  RGW then
@@ -491,4 +520,79 @@ async fn test_assume_role_with_web_identity_client_id() {
     let cfg = get_config();
     let aud = cfg.webidentity_aud.as_deref().unwrap_or("account").to_string();
     assume_role_with_web_identity("WebIdClientIdRole", &[&aud]).await;
+}
+
+/* Rust-only, X2c:  a web identity session in [iam root]'s account reads
+ * and writes a bucket of [iam alt root]'s account under that bucket's
+ * policy, and is refused AccessDenied on one with no grant.  The role's
+ * own policy allows S3 everywhere, so the bucket policy is the only
+ * grant that differs.  Where the gateway impersonates, the session runs
+ * as the role's identity and the other account's object is not its
+ * own:  `Access` expects what the access model does with that, the
+ * read and write served under `s3-native` and refused under
+ * `posix-strict`. */
+#[tokio::test]
+#[cfg_attr(not(feature = "has_keycloak"), ignore = "requires Keycloak (--features has_keycloak)")]
+async fn test_cross_account_web_identity_bucket_policy() {
+    let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+    let role_policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": {"Effect": "Allow", "Action": "s3:*", "Resource": "arn:aws:s3:::*"}
+    }).to_string();
+    let role = WebIdRole::create("WebIdXAcctRole", &[], &role_policy).await;
+    /* the role principal, as `authenticated_user(s)` renders it for an
+     * account with no tenant */
+    let principal = format!("$role${}", role.role_id);
+
+    let alt_s3 = get_iam_alt_root_s3client();
+    let granted = get_new_bucket_name();
+    let ungranted = get_new_bucket_name();
+    for b in [&granted, &ungranted] {
+        alt_s3.create_bucket().bucket(b).send().await.unwrap();
+        alt_s3.put_object().bucket(b).key("alt-obj")
+            .body(ByteStream::from_static(b"alt")).send().await.unwrap();
+    }
+    let policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"AWS": [&role.role_arn]},
+            "Action": ["s3:GetObject", "s3:PutObject"],
+            "Resource": [format!("arn:aws:s3:::{granted}/*")]
+        }]
+    }).to_string();
+    alt_s3.put_bucket_policy().bucket(&granted).policy(&policy).send().await.unwrap();
+
+    let s3 = role.session().await;
+
+    /* the session resolves to an identity, as its request does:  the
+     * role's account's row, the role having none of its own */
+    assert_ne!(fs_access(&granted, "alt-obj", &principal, "r").await, FsAccess::NoIdentity,
+               "the access hint resolved no identity for {principal}");
+
+    /* granted:  the other account's object read, and an object written */
+    let read = Access::ask(Class::Data, &granted, "alt-obj", &principal, "r").await;
+    if let Some(got) = read.expect(s3.get_object().bucket(&granted).key("alt-obj").send().await) {
+        let body = got.body.collect().await.unwrap().into_bytes();
+        assert_eq!(&body[..], b"alt");
+    }
+    let write = Access::ask(Class::Data, &granted, "webid-obj", &principal, "c").await;
+    write.expect(s3.put_object().bucket(&granted).key("webid-obj")
+                 .body(ByteStream::from_static(b"webid")).send().await);
+
+    /* no grant:  refused by S3 before the filesystem is asked */
+    s3_tests_rs::assert_s3_err!(
+        s3.get_object().bucket(&ungranted).key("alt-obj").send().await, 403, "AccessDenied");
+    s3_tests_rs::assert_s3_err!(
+        s3.put_object().bucket(&ungranted).key("webid-obj")
+            .body(ByteStream::from_static(b"webid")).send().await, 403, "AccessDenied");
+
+    /* clean up */
+    for b in [&granted, &ungranted] {
+        for k in ["alt-obj", "webid-obj"] {
+            let _ = alt_s3.delete_object().bucket(b).key(k).send().await;
+        }
+        alt_s3.delete_bucket().bucket(b).send().await.unwrap();
+    }
+    role.delete().await;
 }
