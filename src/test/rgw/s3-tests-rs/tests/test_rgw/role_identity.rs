@@ -27,6 +27,7 @@ use s3_tests_rs::client::{build_s3_client, build_s3_client_with_session_token,
 use s3_tests_rs::config::get_config;
 use s3_tests_rs::features::features;
 use s3_tests_rs::fixtures::{get_new_bucket_name, PrivateAccount, TestGuard};
+use s3_tests_rs::webidentity::WebIdRole;
 
 const UID_ACCOUNT: &str = "70109";
 const UID_ROLE: &str = "70110";
@@ -226,6 +227,78 @@ async fn test_a_role_session_runs_as_the_identity_it_was_given() {
     assert_eq!(as_json(&ghost).unwrap()["outcome"], "none",
         "a role that does not exist was served as something");
 
+}
+
+/// The uid an object a session on `role` writes has on disk:  a bucket
+/// the session makes, and an object in it, so the write is the session's
+/// whatever the access model, and both are gone after.
+async fn written_as(role: &WebIdRole, bucket: &str) -> Option<String> {
+    let session = role.session().await;
+    let _ = session.delete_object().bucket(bucket).key("webid").send().await;
+    let _ = session.delete_bucket().bucket(bucket).send().await;
+    session.create_bucket().bucket(bucket).send().await
+        .expect("the web identity session could not create its bucket");
+    session.put_object().bucket(bucket).key("webid").body(b"webid".to_vec().into())
+        .send().await.expect("the web identity session could not write its object");
+    let on_disk = driver_hint_results("symlink",
+        &[("op", "stat"), ("bucket", bucket), ("key", "webid")]).await
+        .expect("the symlink hint did not answer;  rgw_driver_debug_apis");
+    let _ = session.delete_object().bucket(bucket).key("webid").send().await;
+    let _ = session.delete_bucket().bucket(bucket).send().await;
+    assert_eq!(on_disk.get("kind").map(String::as_str), Some("file"),
+        "the session's object has no entry");
+    on_disk.get("uid").cloned()
+}
+
+/// X2d:  an object a web identity session writes is owned on disk by the
+/// identity the session runs as -- the role's own row under the role
+/// override, its account's without it, and its account's for a role
+/// given none -- as for an AssumeRole session above.  A token claim
+/// never reaches the filesystem.  Each case is the others' control.
+#[cfg_attr(not(all(feature = "rgw_admin", feature = "has_keycloak")),
+           ignore = "requires rgw_admin and Keycloak (--features rgw_admin,has_keycloak)")]
+#[tokio::test]
+async fn test_a_web_identity_sessions_object_is_the_identity_it_was_given() {
+    let _guard = TestGuard::setup();
+    if !impersonating_nsfs().await {
+        eprintln!("not nsfs under impersonation;  nothing to check");
+        return;
+    }
+    let cfg = get_config();
+    let Some(acct) = PrivateAccount::create("webidov").await else {
+        eprintln!("could not make this test's own account");
+        return;
+    };
+
+    let all = r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":"*","Resource":"*"}}"#;
+    let role = WebIdRole::create(&acct.root, &acct.id, "WebIdOv", &[], all).await;
+
+    /* the account's row, and the role's */
+    for (p, uid) in [(("identity", acct.id.as_str()), UID_ACCOUNT),
+                     (("role", role.role_id.as_str()), UID_ROLE)] {
+        let r = nsfs_put_identity(&[p, ("uid", uid), ("gid", uid)]).await;
+        assert_eq!(r.status, 200, "binding {}: {}", p.1, r.body);
+    }
+
+    let bucket = format!("{}webidov", cfg.bucket_prefix);
+    let off = with_role_override("off", written_as(&role, &bucket)).await
+        .expect("no identity-override hint");
+    let on = with_role_override("on", written_as(&role, &bucket)).await
+        .expect("no identity-override hint");
+    /* a role given no identity follows its account, under the override too */
+    let _ = admin_request(reqwest::Method::DELETE, "/admin/nsfs/identity",
+                          &format!("role={}", q(&role.role_id)), None).await;
+    let none = with_role_override("on", written_as(&role, &bucket)).await
+        .expect("no identity-override hint");
+
+    role.delete().await;
+
+    assert_eq!(off.as_deref(), Some(UID_ACCOUNT),
+        "without the role override the session's object is not its account's");
+    assert_eq!(on.as_deref(), Some(UID_ROLE),
+        "under the role override the session's object is not the role's identity's");
+    assert_eq!(none.as_deref(), Some(UID_ACCOUNT),
+        "a role given no identity did not follow its account under the override");
 }
 
 const HEADER: &str = "x-noobaa-custom-bucket-path";

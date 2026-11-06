@@ -12,3 +12,4 @@ pub mod http;
 pub mod notify_receiver;
 pub mod policy;
 pub mod random;
+pub mod webidentity;
