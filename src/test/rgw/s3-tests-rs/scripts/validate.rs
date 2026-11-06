@@ -31,6 +31,7 @@ edition = "2021"
 //!                       [--config FILE] [--build DIR] [--conf FILE]
 //!                       [--adoption-cache DIR] [--noobaa-src DIR]
 //!                       [--work-root DIR] [--parallel-log FILE]
+//!                       [--gpfs-root DIR]
 //!
 //! The paths are this machine's, so none has a default here.  Each comes
 //! from its option, or else from a config file, `key = value` per line.
@@ -48,6 +49,10 @@ edition = "2021"
 //!                                                able to search it
 //!   parallel_log   = /path/to/log               every suite's output,
 //!                                                appended;  optional
+//!   gpfs_root      = /path/on/gpfs              run on GPFS:  every cell's
+//!                                                gateway as `rgw-vstart.sh
+//!                                                --gpfs --gpfs-root`;  work_root
+//!                                                must be on GPFS too;  optional
 //!
 //! `--test` runs only the tests a nextest filter expression selects, in
 //! each cell, in place of its profiles;  `--cells` picks the cells.  The
@@ -254,6 +259,9 @@ struct Opts {
      * directory when unset */
     work_root: Option<PathBuf>,
     parallel_log: Option<PathBuf>,
+    /* the GPFS directory every cell's gateway is started on, its data
+     * root, LMDB and userdb under it;  a local filesystem when unset */
+    gpfs_root: Option<PathBuf>,
 }
 
 /// One command, as it is run and as it is printed.
@@ -305,10 +313,15 @@ impl Overrides {
 }
 
 /// What a run leaves out, said in the plan and in `summary.txt`:  a
-/// preset short of `full`, and override settings.  Empty for a run of
-/// all four settings and no preset, or `full`.
+/// preset short of `full`, and override settings;  and the filesystem,
+/// where it is GPFS.  Empty for a run of all four settings and no
+/// preset, or `full`, on a local filesystem.
 fn partial_run(o: &Opts) -> Vec<String> {
     let mut notes = Vec::new();
+    if let Some(g) = &o.gpfs_root {
+        notes.push(format!("on GPFS:  every gateway under {}, every conversion tree under the \
+                            work root", g.display()));
+    }
     if let Some(p) = o.preset.filter(|p| p.cells.is_some()) {
         notes.push(format!("preset {}:  {};  this run validates only what it ran",
                            p.name, p.what));
@@ -501,6 +514,10 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
             let mut argv = vec![vstart.to_string_lossy().into_owned()];
             argv.extend(s(c.vstart));
             argv.extend(["--port".into(), o.port.to_string()]);
+            if let Some(g) = &o.gpfs_root {
+                argv.extend(["--gpfs".into(), "--gpfs-root".into(),
+                             g.to_string_lossy().into_owned()]);
+            }
             if *lc {
                 argv.push("--with-lifecycle".into());
             }
@@ -782,6 +799,25 @@ fn preflight(o: &Opts, steps: &[Step]) -> Result<(), String> {
                                s.cell, work.unwrap().display()));
         }
     }
+    /* a GPFS run that quietly ran on another filesystem validates that
+     * filesystem again:  the gateways' root, and every conversion tree */
+    if let Some(g) = &o.gpfs_root {
+        let mut on = vec![g.clone()];
+        if steps.iter().any(|s| s.name == "conversion") {
+            on.push(o.work_root.clone().ok_or("gpfs_root is set, and the conversion cells' \
+                trees would be under the run directory;  set work_root to a directory on GPFS")?);
+        }
+        for p in on {
+            let fs = Command::new("stat").args(["-f", "-c", "%T"]).arg(&p).output()
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                .unwrap_or_default();
+            if fs != "gpfs" {
+                return Err(format!("{} is on {}, not GPFS;  gpfs_root and work_root must \
+                                    both be on GPFS", p.display(),
+                                   if fs.is_empty() { "no filesystem stat could name" } else { &fs }));
+            }
+        }
+    }
     if !std::io::stdin().is_terminal() {
         return Err("needs a terminal:  the sudo ticket is per tty, and the password is asked once, here".into());
     }
@@ -947,6 +983,7 @@ fn parse_args() -> Opts {
             "--noobaa-src" => flags.paths.push(("noobaa_src", val("--noobaa-src"))),
             "--work-root" => flags.paths.push(("work_root", val("--work-root"))),
             "--parallel-log" => flags.paths.push(("parallel_log", val("--parallel-log"))),
+            "--gpfs-root" => flags.paths.push(("gpfs_root", val("--gpfs-root"))),
             _ => die(&format!("unknown argument {a};  see the header of validate.rs")),
         }
     }
@@ -1028,6 +1065,7 @@ fn parse_args() -> Opts {
                     else { path("noobaa_src").unwrap_or_default() },
         work_root: path("work_root"),
         parallel_log: path("parallel_log"),
+        gpfs_root: path("gpfs_root"),
         build_dir, source_dir,
     }
 }
@@ -1059,7 +1097,7 @@ fn default_config() -> PathBuf {
 /// not know is refused, so a misspelled one is not silently ignored.
 fn read_config(file: &Path, named: bool) -> std::collections::HashMap<String, String> {
     const KEYS: &[&str] = &["build", "conf", "adoption_cache", "noobaa_src", "work_root",
-                            "parallel_log"];
+                            "parallel_log", "gpfs_root"];
     let mut m = std::collections::HashMap::new();
     let text = match fs::read_to_string(file) {
         Ok(t) => t,
