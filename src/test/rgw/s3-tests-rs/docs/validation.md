@@ -191,7 +191,13 @@ its work directory, so `work_root` has to be on GPFS too.  Both are
 checked (`stat -f`) before anything starts, since a run that fell back
 to a local filesystem would validate that filesystem again;  the run's
 notes name GPFS.  The driver finds GPFS from the filesystem itself:  the
-gateway's log says `rgw-strided` for its multipart layout.
+gateway's log says `rgw-strided` for its multipart layout.  **Only the
+impersonated conversion deployments run on GPFS.**  An unimpersonated
+one runs NooBaa as yourself, so that the tree is the unimpersonated
+gateway's, and NooBaa registers with GPFS (`gpfs_ganesha`) only as
+root;  so on GPFS a conversion runs as an installation does, NooBaa as
+root, and the others are left out, which the run's notes say.  One
+`--cells` names outright is refused.
 
 **The adoption cache is built once,** by the stand-up's first four
 steps with `ADOPTION_WORK` set to the cache directory.  It then holds
