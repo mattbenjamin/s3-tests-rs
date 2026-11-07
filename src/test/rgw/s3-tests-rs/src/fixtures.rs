@@ -58,6 +58,16 @@ async fn cleanup_tracked_buckets_inner() {
     crate::cleanup::nuke_all_prefixed_public(&get_config().bucket_prefix).await;
 }
 
+/// Whether a guard leaves what its test made:  always under
+/// `S3TEST_NO_CLEANUP`, and under `S3TEST_KEEP_FAILED` only when the test
+/// failed -- a guard dropped while its thread panics -- so a test run
+/// many times keeps the one failure and not every bucket it made.
+fn cleanup_skipped() -> bool {
+    std::env::var("S3TEST_NO_CLEANUP").is_ok()
+        || (std::env::var("S3TEST_KEEP_FAILED").is_ok()
+            && std::thread::panicking())
+}
+
 /// RAII guard that cleans up all tracked buckets when dropped.
 /// Add `let _guard = TestGuard::setup();` as the first line of each test.
 pub struct TestGuard;
@@ -87,7 +97,7 @@ impl TestGuard {
 
 impl Drop for TestGuard {
     fn drop(&mut self) {
-        if std::env::var("S3TEST_NO_CLEANUP").is_ok() {
+        if cleanup_skipped() {
             return;
         }
 
@@ -470,7 +480,7 @@ impl PrivateUser {
 
 impl Drop for PrivateUser {
     fn drop(&mut self) {
-        if std::env::var("S3TEST_NO_CLEANUP").is_ok() {
+        if cleanup_skipped() {
             return;
         }
         /* Drop cannot await, so a thread with its own runtime, as
@@ -576,7 +586,7 @@ impl PrivateAccount {
 
 impl Drop for PrivateAccount {
     fn drop(&mut self) {
-        if std::env::var("S3TEST_NO_CLEANUP").is_ok() {
+        if cleanup_skipped() {
             return;
         }
         /* An account with users in it cannot be removed, and the REST

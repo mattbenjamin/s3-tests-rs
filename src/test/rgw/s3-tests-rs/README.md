@@ -283,6 +283,24 @@ r
 Replace `HASH` with the actual hash suffix printed by `--no-run`, and
 substitute the test name you want to debug.
 
+### Run one test until it fails, under load
+
+A race seen once in several baselines is reached faster by running the
+test that showed it many times, beside the rest of the baseline as load.
+nextest repeats a test with `--stress-count`, and stops at its first
+failure;  `S3TEST_KEEP_FAILED=1` leaves that failure's buckets, users and
+accounts for inspection and cleans up after every run that passed:
+
+```bash
+T='test(=versioning::test_versioned_concurrent_object_create_and_remove)'
+cargo nextest run -P baseline --features fails_on_nsfs,rgw_admin -E "not $T" &
+S3TEST_KEEP_FAILED=1 cargo nextest run --features fails_on_nsfs,rgw_admin \
+    --stress-count 2000 -E "$T"
+```
+
+`S3TEST_NO_CLEANUP=1` leaves everything every test made, which a long
+repetition runs into the user's bucket limit (`TooManyBuckets`).
+
 ### Fast-fail on server crash
 
 When testing against a local RGW that may crash (e.g., an in-development SAL
