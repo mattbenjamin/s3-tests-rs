@@ -60,6 +60,12 @@ edition = "2021"
 //! run only when named:  each takes a fresh work directory, with the
 //! NooBaa worktree already built in `--adoption-cache` linked into it.
 //!
+//! `--lifecycle` runs each cell a second time, as `<cell>+lifecycle`,
+//! with the gateway running lifecycle at the suite's interval
+//! (`rgw-vstart.sh --with-lifecycle`):  its profiles, and then the
+//! `lifecycle` profile, which no other step runs.  With `--test` the
+//! expression runs in both, and the `lifecycle` profile does not.
+//!
 //! `--overrides` picks which settings of the two identity overrides the
 //! cells that cross them run:  `off`, `user`, `role`, `user-role`, comma
 //! separated;  all four by default.  `--overrides off,user` leaves the
@@ -689,6 +695,15 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
                         }
                     }
                 }
+            }
+            /* the lifecycle tests, which every profile above filters out,
+             * where the gateway runs lifecycle at the suite's interval */
+            if *lc && o.test.is_none() {
+                let mut st = step(&cell, "lifecycle", suite_dir, s(&["cargo", "nextest", "run",
+                    "-P", "lifecycle", "--no-fail-fast", "--features", FEATURES]));
+                st.env.push(("S3TEST_CONF".into(), conf.to_string_lossy().into()));
+                st.parallel_log = true;
+                steps.push(st);
             }
             for st in &mut steps[first..] {
                 st.overrides = Some(ov);
