@@ -169,6 +169,53 @@ async fn test_object_lock_get_obj_lock_invalid_bucket() {
     assert_s3_err!(result, 404, "ObjectLockConfigurationNotFoundError");
 }
 
+/// An object with no retention and no legal hold, in a lock bucket:
+/// GetObjectRetention and GetObjectLegalHold each answer 404
+/// `NoSuchObjectLockConfiguration`, AWS's code for an object, which is
+/// not the bucket-level `ObjectLockConfigurationNotFoundError` above.
+/// An addition, not a port:  NooBaa returns AWS's code, and the
+/// adoption corpus found RGW returning the bucket's.
+#[cfg_attr(feature = "fails_on_dbstore", ignore = "fails on dbstore")]
+#[tokio::test]
+async fn test_object_lock_get_obj_lock_absent_on_object() {
+    let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+    let client = get_client();
+    let bucket_name = get_new_bucket_name();
+    client
+        .create_bucket()
+        .bucket(&bucket_name)
+        .object_lock_enabled_for_bucket(true)
+        .send()
+        .await
+        .unwrap();
+
+    let key = "file1";
+    client
+        .put_object()
+        .bucket(&bucket_name)
+        .key(key)
+        .body(ByteStream::from_static(b"abc"))
+        .send()
+        .await
+        .unwrap();
+
+    let result = client
+        .get_object_retention()
+        .bucket(&bucket_name)
+        .key(key)
+        .send()
+        .await;
+    assert_s3_err!(result, 404, "NoSuchObjectLockConfiguration");
+
+    let result = client
+        .get_object_legal_hold()
+        .bucket(&bucket_name)
+        .key(key)
+        .send()
+        .await;
+    assert_s3_err!(result, 404, "NoSuchObjectLockConfiguration");
+}
+
 #[cfg_attr(feature = "fails_on_dbstore", ignore = "fails on dbstore")]
 #[tokio::test]
 async fn test_object_lock_put_obj_lock_with_days_and_years() {
