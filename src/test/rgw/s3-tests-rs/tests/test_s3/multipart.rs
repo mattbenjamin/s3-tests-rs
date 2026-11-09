@@ -1529,10 +1529,12 @@ async fn test_multipart_single_get_part() {
     assert_s3_err!(res, 400, "InvalidPart");
 }
 
-/* url_decode() returns "" on invalid percent sequences, silently dropping
- * the copy source; the request degrades to a plain UploadPart with empty
- * body and succeeds.  Likely an op-layer issue, not driver-specific. */
-#[cfg_attr(feature = "fails_on_nsfs", ignore = "nsfs: url_decode drops invalid percent-encoded copy source")]
+/* The copy source names `anyfilename%.txt`, URL-encoded as boto3 encodes
+ * a `CopySource` dict, so the header is `<bucket>/anyfilename%25.txt`:  a
+ * key that does not exist, beside one literally named `anyfilename%25.txt`.
+ * The copy must fail and the target keep its bytes.  The Rust SDK does
+ * not encode `copy_source`;  sending the key raw made the header a
+ * malformed percent sequence, a different request from the original's. */
 #[tokio::test]
 #[cfg_attr(feature = "fails_on_posix", ignore = "posix: multipart listing or size check")]
 async fn test_upload_part_copy_percent_encoded_key() {
@@ -1572,7 +1574,8 @@ async fn test_upload_part_copy_percent_encoded_key() {
         .unwrap();
     let upload_id = mpu.upload_id().unwrap().to_string();
 
-    let copy_source = format!("{}/{}", bucket, raw_key);
+    /* `%` is the one character in this key that needs encoding */
+    let copy_source = format!("{}/{}", bucket, raw_key.replace('%', "%25"));
     let result = client
         .upload_part_copy()
         .bucket(&bucket)
@@ -1589,6 +1592,33 @@ async fn test_upload_part_copy_percent_encoded_key() {
     let resp = client.get_object().bucket(&bucket).key(key).send().await.unwrap();
     let body = get_body(resp).await;
     assert_eq!(body, b"foo");
+
+    /* An addition, not in the original:  the key sent raw, so the header
+     * holds a malformed percent sequence (`%.t`).  It is refused as an
+     * invalid copy source, and is not taken for an upload with no copy
+     * source, which would write an empty part. */
+    let malformed = format!("{}/{}", bucket, raw_key);
+    let result = client
+        .upload_part_copy()
+        .bucket(&bucket)
+        .key(key)
+        .part_number(1)
+        .upload_id(&upload_id)
+        .copy_source(&malformed)
+        .customize()
+        .mutate_request(s3_tests_rs::http::zero_content_length)
+        .send()
+        .await;
+    assert_s3_err!(result, 400, "InvalidArgument");
+    let parts = client
+        .list_parts()
+        .bucket(&bucket)
+        .key(key)
+        .upload_id(&upload_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(parts.parts().is_empty(), "a refused copy wrote a part");
 }
 
 // --- Multipart copy variant tests ---
