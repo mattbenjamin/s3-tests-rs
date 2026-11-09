@@ -20,6 +20,7 @@ mod impersonation;
 mod key_limit;
 mod key_path_conflict;
 mod key_separators;
+mod lifecycle;
 mod nsfs_abandon;
 mod nsfs_place_bucket;
 mod nsfs_symlink;
