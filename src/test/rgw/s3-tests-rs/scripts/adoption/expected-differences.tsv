@@ -131,6 +131,10 @@ unadopted:converted	md5-on	manifest		etag	equal	conversion renames the attribute
 
 noobaa:unadopted		manifest		listed-owner	differs	_get_object_owner() returns undefined always, so NooBaa objects have no owner;  answering from the inode uid is an RGW addition
 noobaa:unadopted		manifest		version.*.owner	differs	same cause as listed-owner, per version
+noobaa:unadopted		manifest		lock-config.absent	vanishes	NooBaa's GetObjectLockConfiguration at the pin answers 200 with `<root_key>` as the XML root -- parse_to_camel_case() builds `{ root_key: ... }`, a literal key, for `{ [root_key]: ... }` (s3_utils.js:657) -- so the SDK cannot parse it and the axis records the error.  The record on disk is right, and RGW serves it.  Fixed in noobaa-core 896fa4c6a (2026-08-05), inside the 5.23 window
+noobaa:unadopted		manifest		lock-config.enabled	appears	same:  what RGW reads from NooBaa's record
+noobaa:unadopted		manifest		lock-config.default-mode	appears	same
+noobaa:unadopted		manifest		lock-config.default-days	appears	same
 noobaa:unadopted		manifest		ownership-controls	differs	NooBaa has no setting, and its GetBucketOwnershipControls error carries no code, so the axis reads Unknown;  RGW, serving the same bucket before adoption, returns OwnershipControlsNotFoundError
 unadopted:converted		manifest		ownership-controls	differs	adoption writes BucketOwnerEnforced on every bucket it adopts, because RGW records the bucket's owner on every object;  NooBaa has no setting, and before adoption the bucket reads as NooBaa's, OwnershipControlsNotFoundError
 noobaa:unadopted		manifest		in-flight-initiator	differs	NooBaa records no initiator for an upload and reports a placeholder;  RGW reports the bucket's owner, deduced

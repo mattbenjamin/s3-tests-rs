@@ -1088,7 +1088,12 @@ fn config(env: &Env) -> Result<(), String> {
      * with the Rust SDK;  a self-signed cert is a problem worth not
      * having when nothing here leaves the host. */
 
-    /* NooBaa's dynamic supplementary groups, under `impersonate` only:
+    /* WORM_ENABLED:  NooBaa's object lock, off by default at the pin
+     * (`config.js:725`), so without it the lock axis writes nothing and
+     * nothing NooBaa locked is ever adopted.  NooBaa's own NC tests set
+     * it the same way (`nc_coretest.js:227`).
+     *
+     * NooBaa's dynamic supplementary groups, under `impersonate` only:
      * NooBaa unprivileged cannot install groups, so the unimpersonated
      * tree is written without them (the `groups` step). */
     let cfg = env.config_root().join("config.json");
@@ -1099,12 +1104,12 @@ fn config(env: &Env) -> Result<(), String> {
     std::fs::create_dir_all(&notify_log)
         .map_err(|e| format!("cannot create {}: {e}", notify_log.display()))?;
     let text = format!(
-        "{{\n    \"ALLOW_HTTP\": true,\n{}    \"NOTIFICATION_LOG_DIR\": {}\n}}\n",
+        "{{\n    \"ALLOW_HTTP\": true,\n    \"WORM_ENABLED\": true,\n{}    \"NOTIFICATION_LOG_DIR\": {}\n}}\n",
         if env.impersonate { "    \"NSFS_ENABLE_DYNAMIC_SUPPLEMENTAL_GROUPS\": true,\n" } else { "" },
         serde_json::Value::from(notify_log.display().to_string()));
     std::fs::write(&cfg, text)
         .map_err(|e| format!("cannot write {}: {e}", cfg.display()))?;
-    println!("         wrote {} (ALLOW_HTTP{})", cfg.display(),
+    println!("         wrote {} (ALLOW_HTTP, WORM_ENABLED{})", cfg.display(),
              if env.impersonate { ", NSFS_ENABLE_DYNAMIC_SUPPLEMENTAL_GROUPS" } else { "" });
 
     /* What `capture` will need, written where it can find it rather
@@ -2096,9 +2101,10 @@ fn capture(env: &Env, side: &str) -> Result<(), String> {
      *
      * The gates that feature carries are permanent and name what
      * NooBaa's implementation does not do -- the multipart ETag is an
-     * identity token rather than a digest with a part count, bucket-
-     * level object lock configuration answers NotImplemented, and
-     * three scaffolding names are hidden by prefix match.  Without it
+     * identity token rather than a digest with a part count, and
+     * three scaffolding names are hidden by prefix match.  (Object lock
+     * was one until the stand-up set NooBaa's `WORM_ENABLED`, which
+     * makes NooBaa implement it.)  Without it
      * `capture`'s exit status carries no signal:  a capability fact
      * and a real disagreement look the same.
      *

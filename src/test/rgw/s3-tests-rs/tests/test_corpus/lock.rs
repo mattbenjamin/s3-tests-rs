@@ -8,9 +8,20 @@
 //! and the disk inventory is the half that can see whether the right
 //! names ended up on the file.
 //!
-//! `NOOBAA_ONDISK_STABILITY.md` names object lock as the part of their
-//! layout still moving, which makes this the axis most likely to need
-//! revisiting against a newer baseline.
+//! Object lock is the feature NooBaa's development line is still
+//! changing (its `WORM_ENABLED` gate is removed upstream after the
+//! pin), which makes this the axis most likely to need revisiting
+//! against a newer baseline.
+//!
+//! **Observing** (the RGW captures of an adopted tree) creates and
+//! writes nothing:  the keys are derived, the version ids come from a
+//! HEAD, and what the gateway reports about NooBaa's locks is
+//! recorded.  The protected-version deletes are attempted all the
+//! same, because whether the gateway enforces a lock NooBaa recorded
+//! is what the axis measures there;  a delete that wrongly succeeds is
+//! recorded, and the object is then absent from the next capture.
+//! NooBaa writes object lock only with `WORM_ENABLED`, which the
+//! stand-up sets.
 //!
 //! Object lock needs its own bucket:  it can only be enabled at
 //! creation and cannot be turned off, so it cannot share with the other
@@ -70,13 +81,9 @@ fn default_mode_of(s: &str) -> ObjectLockRetentionMode {
     }
 }
 
-/* NooBaa returns `501 NotImplemented` to PutObjectLockConfiguration at
- * the pin, so the axis cannot create the bucket it needs and reaches
- * none of its assertions.  Per-object retention is a different
- * surface -- NooBaa does keep that in xattrs -- and only the
- * bucket-level configuration returns 501. */
-#[cfg_attr(feature = "fails_on_noobaa",
-           ignore = "noobaa: PutObjectLockConfiguration is NotImplemented")]
+/* NooBaa at the pin implements object lock only under `WORM_ENABLED`;
+ * without it every lock operation returns `501 NotImplemented` and the
+ * axis reaches none of its assertions.  The stand-up sets it. */
 #[tokio::test]
 async fn corpus_coverage_object_lock() {
     let tier = env_or(crate::env::TIER, "coverage");
@@ -85,7 +92,10 @@ async fn corpus_coverage_object_lock() {
     }
     let client = get_client();
     let b = bucket(&tier, "lock");
-    ensure_lock_bucket(&client, &b).await;
+    let observing = crate::generate::observing();
+    if !observing {
+        ensure_lock_bucket(&client, &b).await;
+    }
 
     let mut m = Manifest::new();
     m.bucket(&b, "tier", &tier);
@@ -130,8 +140,15 @@ async fn corpus_coverage_object_lock() {
             });
         }
 
-        let r = req.send().await.expect("locked put");
-        let vid = r.version_id().map(String::from).unwrap_or_default();
+        /* An observing pass did not write it:  the key and what it
+         * declared are derived, and its version id comes from a HEAD
+         * below. */
+        let vid = if observing {
+            String::new()
+        } else {
+            let r = req.send().await.expect("locked put");
+            r.version_id().map(String::from).unwrap_or_default()
+        };
         m.object(&key, "declared-lock", class.label());
         if let Some(mode) = class.retention() {
             m.object(&key, "declared-retention-mode", mode);
@@ -156,29 +173,25 @@ async fn corpus_coverage_object_lock() {
                 .build(),
         )
         .build();
-    /* Observing is not available here, and saying so beats half-doing
-     * it.  The axis's subject is a bucket-level configuration, and a
-     * bucket NooBaa fails to create -- it returns 501 to
-     * PutObjectLockConfiguration -- is not in the tree to be
-     * described.  The expected-difference list carries that as
-     * `run coverage-lock absent`. */
-    if crate::generate::observing() {
-        eprintln!("corpus {tier}/lock: observing, and there is nothing to \
-                   observe -- the axis's bucket is created by the axis");
-        return;
+    /* What the axis declares for the bucket, recorded either way;  what
+     * the gateway reports back is read below, as `lock-config.*`. */
+    if !observing {
+        client
+            .put_object_lock_configuration()
+            .bucket(&b)
+            .object_lock_configuration(conf)
+            .send()
+            .await
+            .expect("put_object_lock_configuration");
     }
-
-    client
-        .put_object_lock_configuration()
-        .bucket(&b)
-        .object_lock_configuration(conf)
-        .send()
-        .await
-        .expect("put_object_lock_configuration");
     m.bucket(&b, "default-retention.mode", "GOVERNANCE");
     m.bucket(&b, "default-retention.days", "1");
 
-    {
+    if observing {
+        let key = format!("l-{}", LockClass::BucketDefault.label());
+        m.object(&key, "declared-lock", LockClass::BucketDefault.label());
+        written.push((LockClass::BucketDefault, key, String::new()));
+    } else {
         let key = format!("l-{}", LockClass::BucketDefault.label());
         let r = client
             .put_object()
@@ -196,12 +209,55 @@ async fn corpus_coverage_object_lock() {
         ));
     }
 
+    /* The bucket's lock configuration, as the gateway reports it. */
+    match client.get_object_lock_configuration().bucket(&b).send().await {
+        Ok(r) => {
+            if let Some(c) = r.object_lock_configuration() {
+                if let Some(e) = c.object_lock_enabled() {
+                    m.bucket(&b, "lock-config.enabled", e.as_str());
+                }
+                if let Some(d) = c.rule().and_then(|r| r.default_retention()) {
+                    if let Some(mode) = d.mode() {
+                        m.bucket(&b, "lock-config.default-mode", mode.as_str());
+                    }
+                    if let Some(days) = d.days() {
+                        m.bucket(&b, "lock-config.default-days", &days.to_string());
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let code = e.into_service_error().meta().code().unwrap_or("Unknown").to_string();
+            m.bucket(&b, "lock-config.absent", &code);
+        }
+    }
+
+    /* An observing pass takes each object's version id from a HEAD, and
+     * records one it derived and cannot find as absent rather than
+     * asserting on it:  comparing manifests is the diff stage's job. */
+    let mut absent = std::collections::BTreeSet::new();
+    if observing {
+        for (_class, key, vid) in written.iter_mut() {
+            match client.head_object().bucket(&b).key(key.as_str()).send().await {
+                Ok(h) => *vid = h.version_id().unwrap_or_default().to_string(),
+                Err(e) if e.as_service_error().is_some_and(|s| s.is_not_found()) => {
+                    m.object(key, "observed", "absent");
+                    absent.insert(key.clone());
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
     /* What S3 reports back.  Both calls answer per object, and an
      * object with nothing set answers with an error rather than an
      * empty value -- recorded as a fact, since which error is a
      * question this corpus must not presume. */
     let mut problems: Vec<String> = Vec::new();
     for (class, key, _vid) in &written {
+        if absent.contains(key) {
+            continue;
+        }
         match client
             .get_object_retention()
             .bucket(&b)
@@ -324,6 +380,9 @@ async fn corpus_coverage_object_lock() {
         ))
     };
     for (class, key, _vid) in &written {
+        if absent.contains(key) {
+            continue;
+        }
         if let Some(mode) = class.retention() {
             if !fact(key, "retention.mode", mode) {
                 problems.push(format!(
