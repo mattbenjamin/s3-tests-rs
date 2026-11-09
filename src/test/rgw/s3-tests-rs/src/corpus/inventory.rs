@@ -116,10 +116,10 @@ impl Inventory {
                 self.dirs.push((rel.clone(), md.mode() & 0o7777));
             }
 
-            /* llistxattr() omits the `user.*` names of an entry the
-             * caller cannot read, and says nothing;  so an entry this
-             * walker cannot read is recorded as such, and neither its
-             * attributes nor what is below it are guessed at */
+            /* an entry this walker cannot read is recorded as such,
+             * and neither its attributes nor what is below it are
+             * recorded:  below an unreadable directory nothing can be
+             * listed, and a file is treated the same way */
             if ty != "l" && !readable(&path) {
                 self.lines.insert(format!("{}\tunreadable", encode(&rel)));
                 self.unreadable.push(rel);
@@ -311,10 +311,9 @@ fn mode_policy(spec: Option<&str>, default: u32) -> ModePolicy {
 /// inventory needs libc.  `llistxattr` rather than `listxattr`, for the
 /// same reason the walk uses `lstat`.
 ///
-/// Note that this omits `user.*` names the caller cannot read -- that is
-/// `listxattr`'s documented behaviour (`docs/IMPERSONATED_XATTR.md`) --
-/// so the walk asks `readable()` first and records an entry it cannot
-/// read rather than calling this on it.
+/// Listing names needs no read permission on the entry;  the walk asks
+/// `readable()` first anyway, and records an entry it cannot read
+/// rather than calling this on it.
 fn list_xattr_names(path: &Path) -> std::io::Result<Vec<String>> {
     let c = CString::new(path.as_os_str().as_bytes())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
