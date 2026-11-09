@@ -13,7 +13,12 @@
 #   it for the whole daemon, and every cross-identity test reads it, so
 #   it never runs beside another:  it is out of baseline, runs alone in
 #   all, and has its own profile, access-model-switch, which takes about
-#   a second and runs after baseline.
+#   a second and runs after baseline.  The lifecycle tests run one at a
+#   time (test-group serial-lifecycle), as the Python suite runs them:
+#   each sleeps for a fixed number of lc_debug_interval and then asserts
+#   what lifecycle has done, and side by side their buckets wait for the
+#   same few lifecycle workers, so a check comes before the pass it
+#   waits for.
 #
 # To force serial execution: add --test-threads=1
 #
@@ -34,11 +39,18 @@ max-threads = 1
 [test-groups.serial-nsfs-identity]
 max-threads = 1
 
+[test-groups.serial-lifecycle]
+max-threads = 1
+
 # Every profile applies the default profile's overrides after its own,
 # so a per-module profile or a bare -E serializes IAM as baseline does.
 [[profile.default.overrides]]
 filter = 'test(user_policy::) | test(cross_account::) | test(role::) | test(oidc::) | test(/^sts::/) | test(group::) | test(user::)'
 test-group = 'serial-iam'
+
+[[profile.default.overrides]]
+filter = 'test(lifecycle::) | test(=versioning::test_delete_marker_expiration)'
+test-group = 'serial-lifecycle'
 
 # --- Per-module profiles ---
 
