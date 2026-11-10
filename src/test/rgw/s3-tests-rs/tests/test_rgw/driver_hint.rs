@@ -12,7 +12,12 @@
 //! gateway it answers 403 and every test here skips -- the same rule the
 //! features query follows, where absent means unknown and never false.
 
+use std::collections::HashMap;
+use std::panic::{resume_unwind, AssertUnwindSafe};
+
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{BucketVersioningStatus, VersioningConfiguration};
+use futures_util::FutureExt;
 
 use s3_tests_rs::admin::driver_hint_results;
 use s3_tests_rs::client::get_client;
@@ -156,4 +161,121 @@ async fn test_driver_hint_buffered_copy_accounts_bytes() {
          the copy did not take the fallback, or another copy was counted");
     assert_eq!(after.get("enabled").map(String::as_str), Some("false"),
         "the hint did not report itself disarmed");
+}
+
+/// `pool-hops` for `user`:  its hops to the helper pool since the last
+/// call, by kind, reset.  `None` when the gateway has no such hint.
+async fn pool_hops(user: &str) -> Option<HashMap<String, u64>> {
+    let out = driver_hint_results("pool-hops", &[("user", user)]).await?;
+    let mut n = HashMap::new();
+    for k in ["link", "attr_write", "attr_read", "other"] {
+        n.insert(k.to_string(), out.get(k)?.parse().ok()?);
+    }
+    Some(n)
+}
+
+async fn set_no_ring(user: &str, on: bool) {
+    let _ = driver_hint_results(
+        "inject-no-ring",
+        &[("user", user), ("enable", if on { "true" } else { "false" })]).await;
+}
+
+/// A put, an overwrite and a versioned delete of `key`, as `user`.
+async fn put_overwrite_delete(user: &PrivateUser, bucket: &str, key: &str) {
+    let c = &user.client;
+    for body in ["first", "second"] {
+        c.put_object().bucket(bucket).key(key)
+            .body(ByteStream::from_static(body.as_bytes()))
+            .send().await.unwrap();
+    }
+    c.delete_object().bucket(bucket).key(key).send().await.unwrap();
+}
+
+/// N-D3, end to end:  under impersonation an identity's links and
+/// attribute operations run on the ring.  A put, an overwrite and a
+/// versioned delete -- the publish link, the demotes, the CAS unlink, a
+/// delete marker and its attributes -- make no link or attribute-read
+/// hop to the helper pool, and no attribute-write hop on posix.  On GPFS
+/// an object's own attributes are written through `gpfs_fcntl`, which
+/// the ring cannot carry, so attribute writes there still hop.
+///
+/// Two controls.  The main user's operations in between are another
+/// user's, so `pool-hops` must not count them:  the hint is scoped to
+/// its user.  And with the ring withheld for this user
+/// (`inject-no-ring`) the same sequence must hop for each kind, which
+/// shows the counter can see a hop and that the fallback, today's path,
+/// still serves:  the requests succeed either way.
+#[cfg_attr(not(feature = "rgw_admin"), ignore = "requires rgw_admin feature")]
+#[tokio::test]
+async fn test_driver_hint_links_and_attributes_take_no_hop() {
+    let _guard = TestGuard::setup();
+
+    let Some(f) = features().await else {
+        eprintln!("no features reported;  nothing to check");
+        return;
+    };
+    if f.backend.as_deref() != Some("nsfs")
+        || f.get_bool("impersonate") != Some(true) {
+        eprintln!("the ring serves an identity only under impersonation;  \
+                   skipped");
+        return;
+    }
+    let gpfs = f.get_str("strategy") == Some("gpfs");
+
+    let Some(user) = PrivateUser::create("nohop").await else {
+        eprintln!("could not make this test's own user");
+        return;
+    };
+    assert!(user.bind(UID_BUFCOPY, GID_BUFCOPY, None).await,
+        "binding this test's user failed");
+    /* a leak from a killed run heals here rather than deciding this one */
+    set_no_ring(&user.id, false).await;
+    if pool_hops(&user.id).await.is_none() {
+        eprintln!("no pool-hops hint;  nothing to check");
+        return;
+    }
+
+    let bucket = get_new_bucket(Some(&user.client)).await;
+    user.client.put_bucket_versioning().bucket(&bucket)
+        .versioning_configuration(VersioningConfiguration::builder()
+            .status(BucketVersioningStatus::Enabled).build())
+        .send().await.unwrap();
+    let _ = pool_hops(&user.id).await;
+
+    /* the scope's control:  another user's put and delete are not this
+     * user's hops */
+    let main = get_client();
+    let other = get_new_bucket(Some(&main)).await;
+    main.put_object().bucket(&other).key("k")
+        .body(ByteStream::from_static(b"main")).send().await.unwrap();
+    main.delete_object().bucket(&other).key("k").send().await.unwrap();
+    let none = pool_hops(&user.id).await.unwrap();
+    assert!(none.values().all(|&n| n == 0),
+        "another user's requests were counted:  {none:?}");
+
+    put_overwrite_delete(&user, &bucket, "ring/k").await;
+    let ring = pool_hops(&user.id).await.unwrap();
+    assert_eq!(ring["link"], 0, "a link took the pool:  {ring:?}");
+    assert_eq!(ring["attr_read"], 0,
+        "an attribute read took the pool:  {ring:?}");
+    if !gpfs {
+        assert_eq!(ring["attr_write"], 0,
+            "an attribute write took the pool:  {ring:?}");
+    }
+
+    /* the negative control, cleared on the panicking path too */
+    set_no_ring(&user.id, true).await;
+    let out = AssertUnwindSafe(
+        put_overwrite_delete(&user, &bucket, "pool/k")).catch_unwind().await;
+    set_no_ring(&user.id, false).await;
+    if let Err(panic) = out {
+        resume_unwind(panic);
+    }
+    let pool = pool_hops(&user.id).await.unwrap();
+    assert!(pool["link"] > 0 && pool["attr_write"] > 0 && pool["attr_read"] > 0,
+        "with the ring withheld the same requests made no hop of some \
+         kind, so the zeros above are not evidence:  {pool:?}");
+
+    let _ = driver_hint_results("pool-hops",
+        &[("user", &user.id), ("enable", "false")]).await;
 }
