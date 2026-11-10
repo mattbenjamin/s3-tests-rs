@@ -259,8 +259,13 @@ and `--cells` are exclusive.
 | run one test in every deployment that has it | `--test 'test(=module::test_name)'`, which replaces each deployment's profiles with that filter |
 | see what would run | `--dry-run`, which prints every command and runs none |
 
-`--no-librgw` skips the librgw suites in `plain`, and `--lifecycle`
-starts the fresh deployments with `--with-lifecycle`.
+`--no-librgw` skips the librgw suites in `plain`.  `--lifecycle` runs
+each fresh deployment a second time, as `<cell>+lifecycle`, started with
+`--with-lifecycle`:  its profiles, then `-P lifecycle`, one test at a
+time, about a quarter of an hour per deployment.  With `--cells`, every
+deployment named takes the variant;  with `--preset`, only the preset's
+lifecycle cells do:  posix-strict for `quick`;  posix-strict,
+s3-native-user and plain for `cover`;  every deployment for `full`.
 
 **Reading a run.**  Each run writes `target/validate/<timestamp>/`:  a
 directory per deployment with one log per step, and `summary.txt`, one

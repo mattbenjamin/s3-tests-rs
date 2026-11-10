@@ -64,7 +64,10 @@ edition = "2021"
 //! with the gateway running lifecycle at the suite's interval
 //! (`rgw-vstart.sh --with-lifecycle`):  its profiles, and then the
 //! `lifecycle` profile, which no other step runs.  With `--test` the
-//! expression runs in both, and the `lifecycle` profile does not.
+//! expression runs in both, and the `lifecycle` profile does not.  With
+//! `--cells` every cell named takes the variant;  with `--preset`, only
+//! the preset's lifecycle cells do, since the variant costs a quarter of
+//! an hour a cell (`PRESETS`).
 //!
 //! `--overrides` picks which settings of the two identity overrides the
 //! cells that cross them run:  `off`, `user`, `role`, `user-role`, comma
@@ -217,15 +220,21 @@ const CELLS: &[Cell] = &[
            by_default: false },
 ];
 
-/* Named sets of cells, for `--preset`.  `cells: None` is every cell. */
+/* Named sets of cells, for `--preset`.  `cells: None` is every cell.
+ * `lifecycle` is the cells that take the `+lifecycle` variant under
+ * `--lifecycle`, `None` every cell:  lifecycle differs by whether the
+ * gateway impersonates and, if it does, by access model, so one cell of
+ * each represents it. */
 struct Preset {
     name: &'static str,
     cells: Option<&'static [&'static str]>,
+    lifecycle: Option<&'static [&'static str]>,
     what: &'static str,
 }
 
 const PRESETS: &[Preset] = &[
     Preset { name: "quick", cells: Some(&["posix-strict", "plain"]),
+             lifecycle: Some(&["posix-strict"]),
              what: "impersonation on and off, the switches and librgw;  both overrides off, no adoption" },
     /* every value of every dimension once, fresh and adopted, and the web
      * identity tests under each access model;  not every combination */
@@ -235,9 +244,10 @@ const PRESETS: &[Preset] = &[
                            "conversion", "conversion-posix-strict-role", "conversion-s3-native-user",
                            "conversion-user-role", "conversion-promotion",
                            "keycloak-s3-native", "keycloak-posix-strict"]),
+             lifecycle: Some(&["posix-strict", "s3-native-user", "plain"]),
              what: "every value of every dimension once, fresh and adopted, and the web identity \
                     tests under each access model;  not every combination" },
-    Preset { name: "full", cells: None, what: "every cell" },
+    Preset { name: "full", cells: None, lifecycle: None, what: "every cell" },
 ];
 
 struct Opts {
@@ -333,6 +343,10 @@ fn partial_run(o: &Opts) -> Vec<String> {
         notes.push(format!("preset {}:  {};  this run validates only what it ran",
                            p.name, p.what));
     }
+    if let Some(l) = o.preset.filter(|_| o.lifecycle).and_then(|p| p.lifecycle) {
+        notes.push(format!("lifecycle:  the +lifecycle variant runs only in {}",
+                           l.join(", ")));
+    }
     let left: Vec<&str> = Overrides::ALL.iter().filter(|ov| !o.overrides.contains(ov))
         .map(|ov| ov.name()).collect();
     if !left.is_empty() {
@@ -342,6 +356,12 @@ fn partial_run(o: &Opts) -> Vec<String> {
             left.join(", ")));
     }
     notes
+}
+
+/// Whether the cell takes the `+lifecycle` variant under `--lifecycle`:
+/// any cell `--cells` names, and a preset's lifecycle cells.
+fn lifecycle_cell(o: &Opts, name: &str) -> bool {
+    o.preset.and_then(|p| p.lifecycle).is_none_or(|l| l.contains(&name))
 }
 
 /// Whether the cell's stand-up runs NooBaa as this user rather than as
@@ -531,7 +551,8 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
         }
         let keycloak = c.suites.iter().any(|s| matches!(s, Suite::Keycloak));
         /* a conversion's gateway is started with --with-lifecycle already */
-        let variants = if o.lifecycle && !c.vstart.is_empty() { &[false, true][..] }
+        let variants = if o.lifecycle && !c.vstart.is_empty() && lifecycle_cell(o, &name) {
+                           &[false, true][..] }
                        else { &[false][..] };
         for lc in variants {
             let cell = if *lc { format!("{name}+lifecycle") } else { name.clone() };
