@@ -194,10 +194,11 @@ async fn put_overwrite_delete(user: &PrivateUser, bucket: &str, key: &str) {
 /// N-D3, end to end:  under impersonation an identity's links and
 /// attribute operations run on the ring.  A put, an overwrite and a
 /// versioned delete -- the publish link, the demotes, the CAS unlink, a
-/// delete marker and its attributes -- make no link or attribute-read
-/// hop to the helper pool, and no attribute-write hop on posix.  On GPFS
-/// an object's own attributes are written through `gpfs_fcntl`, which
-/// the ring cannot carry, so attribute writes there still hop.
+/// delete marker and its attributes -- make no attribute-read hop to the
+/// helper pool, and, where the gateway reports `ring_metadata_changes`,
+/// no link or attribute-write hop either.  On GPFS it reports false:
+/// metadata changes stay on the pool, whose eight helpers keep them under
+/// GPFS's concurrency cliff, so links and attribute writes there hop.
 ///
 /// Two controls.  The main user's operations in between are another
 /// user's, so `pool-hops` must not count them:  the hint is scoped to
@@ -220,7 +221,9 @@ async fn test_driver_hint_links_and_attributes_take_no_hop() {
                    skipped");
         return;
     }
-    let gpfs = f.get_str("strategy") == Some("gpfs");
+    /* the gateway says which way its metadata changes go;  absent, as
+     * before N-D3's GPFS switch, means the ring */
+    let meta_on_ring = f.get_bool("ring_metadata_changes").unwrap_or(true);
 
     let Some(user) = PrivateUser::create("nohop").await else {
         eprintln!("could not make this test's own user");
@@ -255,12 +258,16 @@ async fn test_driver_hint_links_and_attributes_take_no_hop() {
 
     put_overwrite_delete(&user, &bucket, "ring/k").await;
     let ring = pool_hops(&user.id).await.unwrap();
-    assert_eq!(ring["link"], 0, "a link took the pool:  {ring:?}");
     assert_eq!(ring["attr_read"], 0,
         "an attribute read took the pool:  {ring:?}");
-    if !gpfs {
+    if meta_on_ring {
+        assert_eq!(ring["link"], 0, "a link took the pool:  {ring:?}");
         assert_eq!(ring["attr_write"], 0,
             "an attribute write took the pool:  {ring:?}");
+    } else {
+        assert!(ring["link"] > 0 && ring["attr_write"] > 0,
+            "the gateway reports metadata changes on the pool, and none \
+             took it:  {ring:?}");
     }
 
     /* the negative control, cleared on the panicking path too */
