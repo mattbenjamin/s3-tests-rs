@@ -29,4 +29,5 @@ mod quota;
 mod reserved_names;
 mod role_identity;
 mod root_object;
+mod sideload;
 mod version_listing;
