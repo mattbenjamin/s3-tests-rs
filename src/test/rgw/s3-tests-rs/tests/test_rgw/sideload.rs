@@ -15,14 +15,14 @@
 //!
 //! The ETag after an in-place overwrite follows NooBaa's `_get_etag()`
 //! (`namespace_fs.js:2866`):  a stored digest is returned whatever the
-//! file now holds;  a file with none gets a token from its current inode
-//! and mtime, which an overwrite changes.  NooBaa with MD5 off stores no
-//! token, so an object RGW wrote under `rgw_non_md5_etag` should change
-//! too;  ours keeps the token recorded at its PUT (punch list
-//! 2026-11-11).  An object RGW wrote also carries the checksum its PUT
-//! sent, which GET returns and SDKs validate;  NooBaa stores none, and
-//! after an overwrite outside ours fails every read (punch list
-//! 2026-11-11).
+//! file now holds;  a file with none gets a synthetic ETag from its
+//! current inode and mtime, which an overwrite changes.  NooBaa with MD5
+//! off stores none and synthesizes it on every read, so the synthetic
+//! ETag an RGW PUT under `rgw_non_md5_etag` stores is synthesized afresh
+//! once the file was overwritten in place.  An object RGW wrote also
+//! carries the checksum its PUT sent, which GET returns and SDKs
+//! validate;  NooBaa stores none, and RGW returns it only while the file
+//! is the one it was computed over (DECISIONS 2026-11-11).
 //!
 //! The gateway makes the changes, through the `sideload` driver hint,
 //! as the symlink tests make links.  Under impersonation they are made
@@ -295,11 +295,9 @@ async fn test_a_sideloaded_file_overwritten_in_place_reads_its_new_contents() {
 
 /// An object RGW wrote, then overwritten in place outside, reads with its
 /// new contents.  The PUT stored the SDK's checksum, which GET returns
-/// and the SDK validates, so a checksum that no longer describes the
-/// file fails every read of it;  NooBaa stores and returns none.
+/// and the SDK validates;  the gateway returns it only while the file is
+/// the one it was computed over, so the overwritten object reads.
 #[cfg_attr(not(feature = "rgw_admin"), ignore = "requires rgw_admin feature")]
-#[cfg_attr(feature = "fails_on_nsfs",
-           ignore = "nsfs: a stored checksum outlives an overwrite outside (punch list 2026-11-11)")]
 #[tokio::test]
 async fn test_an_object_overwritten_in_place_reads_its_new_contents() {
     let _guard = TestGuard::setup();
@@ -314,6 +312,29 @@ async fn test_an_object_overwritten_in_place_reads_its_new_contents() {
     }
     assert_eq!(body(&bucket, "seen").await, "rewritten outside");
     assert_eq!(head(&bucket, "seen").await.0, 17);
+}
+
+/// The control for the test above:  an object nobody changed still
+/// returns the checksum its PUT stored, so the SDK validates the read --
+/// a gateway that dropped every checksum would pass the test above.
+#[cfg_attr(not(feature = "rgw_admin"), ignore = "requires rgw_admin feature")]
+#[tokio::test]
+async fn test_an_unchanged_object_returns_its_stored_checksum() {
+    let _guard = TestGuard::setup();
+    if !nsfs_only().await {
+        eprintln!("not nsfs;  nothing to check");
+        return;
+    }
+    let bucket = get_new_bucket(Some(&get_client())).await;
+    put(&bucket, "kept", "unchanged").await;
+    let out = get_client().head_object().bucket(&bucket).key("kept")
+        .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
+        .send().await
+        .unwrap_or_else(|e| panic!("HEAD kept: {e:?}"));
+    assert!(out.checksum_crc32().is_some() || out.checksum_crc32_c().is_some()
+            || out.checksum_crc64_nvme().is_some() || out.checksum_sha1().is_some()
+            || out.checksum_sha256().is_some(),
+            "an unchanged object returned no checksum");
 }
 
 /// An object carrying a stored digest keeps that ETag after an in-place
@@ -344,8 +365,8 @@ async fn test_a_stored_digest_survives_an_overwrite_in_place() {
     assert_eq!(after, before, "the stored digest was not returned");
 }
 
-/// A file with no stored ETag gets a token from its inode and mtime, and
-/// an in-place overwrite outside changes it, as NooBaa's does.
+/// A file with no stored ETag gets a synthetic ETag from its inode and
+/// mtime, and an in-place overwrite outside changes it, as NooBaa's does.
 #[cfg_attr(not(feature = "rgw_admin"), ignore = "requires rgw_admin feature")]
 #[tokio::test]
 async fn test_a_sideloaded_files_etag_follows_an_overwrite_in_place() {
@@ -369,13 +390,11 @@ async fn test_a_sideloaded_files_etag_follows_an_overwrite_in_place() {
     assert_ne!(after, before, "the ETag did not follow the overwrite");
 }
 
-/// An object RGW wrote under `rgw_non_md5_etag` should get a new ETag
-/// after an in-place overwrite outside, as NooBaa with MD5 off computes
-/// its token from the current stat;  ours returns the token recorded at
-/// the PUT.
+/// An object RGW wrote under `rgw_non_md5_etag` gets a new ETag after an
+/// in-place overwrite outside, as NooBaa with MD5 off synthesizes it from
+/// the current stat:  the synthetic ETag stored at the PUT names the same
+/// inode with an older mtime, and is synthesized afresh.
 #[cfg_attr(not(feature = "rgw_admin"), ignore = "requires rgw_admin feature")]
-#[cfg_attr(feature = "fails_on_nsfs",
-           ignore = "nsfs: a recorded non-MD5 etag outlives an overwrite outside (punch list 2026-11-11)")]
 #[tokio::test]
 async fn test_a_non_md5_etag_follows_an_overwrite_in_place() {
     let _guard = TestGuard::setup();
@@ -388,14 +407,14 @@ async fn test_a_non_md5_etag_follows_an_overwrite_in_place() {
         return;
     }
     let bucket = get_new_bucket(Some(&get_client())).await;
-    put(&bucket, "tokened", "first").await;
-    let (_, before) = head(&bucket, "tokened").await;
+    put(&bucket, "synthetic", "first").await;
+    let (_, before) = head(&bucket, "synthetic").await;
     tokio::time::sleep(Duration::from_millis(20)).await;
-    if write(&bucket, "tokened", "second, longer").await.is_none() {
+    if write(&bucket, "synthetic", "second, longer").await.is_none() {
         eprintln!("sideload hint unavailable;  nothing to check");
         return;
     }
-    let (size, after) = head(&bucket, "tokened").await;
+    let (size, after) = head(&bucket, "synthetic").await;
     assert_eq!(size, 14);
-    assert_ne!(after, before, "the recorded token outlived the overwrite");
+    assert_ne!(after, before, "the stored synthetic ETag outlived the overwrite");
 }
