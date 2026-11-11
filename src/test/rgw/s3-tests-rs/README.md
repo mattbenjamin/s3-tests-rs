@@ -190,6 +190,7 @@ cargo nextest run -P baseline --features fails_on_nsfs,rgw_admin
 cargo nextest run -P access-model-switch --features fails_on_nsfs,rgw_admin
 cargo nextest run -P dynamic-groups --features fails_on_nsfs,rgw_admin
 cargo nextest run -P role-identity --features fails_on_nsfs,rgw_admin
+cargo nextest run -P listing-intervals --features fails_on_nsfs,rgw_admin
 ```
 
 `dynamic-groups-membership` runs one of the `dynamic-groups` tests

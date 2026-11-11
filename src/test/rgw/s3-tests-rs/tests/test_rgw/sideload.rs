@@ -5,12 +5,13 @@
 //! NooBaa lists such a file at once:  its directory cache checks each
 //! directory's inode and mtime on every listing, and every entry it
 //! returns is stat'd (noobaa-core `68ca22d33`, `namespace_fs.js:346`).
-//! RGW's listing cache is filled once per bucket and never checked
-//! again, so a change after a bucket's first listing is missing from its
-//! listings until a restart (DECISIONS 2026-11-11, the revalidation
-//! option, not built).  Those tests are ignored on nsfs;  `--ignored`
-//! runs them.  GET and HEAD read the file itself and are tested as
-//! they stand.
+//! RGW's listing cache is filled from a walk of the bucket's tree;  with
+//! `rgw_nsfs_listing_revalidate`, on by default, a listing checks each
+//! directory it enters and reads one that changed (DECISIONS
+//! 2026-11-11).  The listing tests skip where the gateway reports it
+//! off.  An overwrite in place is listed within an interval, and its
+//! test sets the interval, so it runs alone:  `listing_intervals.rs`.
+//! GET and HEAD read the file itself.
 //!
 //! The ETag after an in-place overwrite follows NooBaa's `_get_etag()`
 //! (`namespace_fs.js:2866`):  a stored digest is returned whatever the
@@ -38,14 +39,14 @@ use s3_tests_rs::features::features;
 use s3_tests_rs::fixtures::{get_new_bucket, TestGuard};
 
 /// `None` from the accessor means unknown, so skip rather than assert.
-async fn nsfs_only() -> bool {
+pub(crate) async fn nsfs_only() -> bool {
     match features().await {
         Some(f) => f.backend.as_deref() == Some("nsfs"),
         None => false,
     }
 }
 
-async fn feature(name: &str) -> bool {
+pub(crate) async fn feature(name: &str) -> bool {
     match features().await {
         Some(f) => f.get_bool(name).unwrap_or(false),
         None => false,
@@ -54,7 +55,7 @@ async fn feature(name: &str) -> bool {
 
 /// One `sideload` operation;  `None` where the hint is not reachable,
 /// so the caller skips.
-async fn sideload(op: &str, bucket: &str, key: &str, extra: &[(&str, &str)])
+pub(crate) async fn sideload(op: &str, bucket: &str, key: &str, extra: &[(&str, &str)])
     -> Option<HashMap<String, String>> {
     let me = get_config().main_user_id.clone();
     let mut params = vec![("op", op), ("bucket", bucket), ("key", key)];
@@ -67,21 +68,21 @@ async fn sideload(op: &str, bucket: &str, key: &str, extra: &[(&str, &str)])
 
 /// `body` written at `key`, as a filesystem client would;  `None` where
 /// the hint is not reachable.
-async fn write(bucket: &str, key: &str, body: &str) -> Option<()> {
+pub(crate) async fn write(bucket: &str, key: &str, body: &str) -> Option<()> {
     let body = q(body);
     let r = sideload("write", bucket, key, &[("body", body.as_str())]).await?;
     assert!(r.contains_key("ino"), "the hint wrote {key} but reports no inode");
     Some(())
 }
 
-async fn put(bucket: &str, key: &str, body: &str) {
+pub(crate) async fn put(bucket: &str, key: &str, body: &str) {
     get_client().put_object().bucket(bucket).key(key)
         .body(ByteStream::from(body.as_bytes().to_vec()))
         .send().await
         .unwrap_or_else(|e| panic!("PUT {key}: {e:?}"));
 }
 
-async fn body(bucket: &str, key: &str) -> String {
+pub(crate) async fn body(bucket: &str, key: &str) -> String {
     let out = get_client().get_object().bucket(bucket).key(key)
         .send().await
         .unwrap_or_else(|e| panic!("GET {key}: {e:?}"));
@@ -90,7 +91,7 @@ async fn body(bucket: &str, key: &str) -> String {
 }
 
 /// HEAD's size and ETag.
-async fn head(bucket: &str, key: &str) -> (i64, String) {
+pub(crate) async fn head(bucket: &str, key: &str) -> (i64, String) {
     let out = get_client().head_object().bucket(bucket).key(key)
         .send().await
         .unwrap_or_else(|e| panic!("HEAD {key}: {e:?}"));
@@ -100,7 +101,7 @@ async fn head(bucket: &str, key: &str) -> (i64, String) {
 
 /// Every key and its size, and the common prefixes, listed with
 /// `delimiter`.
-async fn list(bucket: &str, delimiter: Option<&str>)
+pub(crate) async fn list(bucket: &str, delimiter: Option<&str>)
     -> (HashMap<String, i64>, Vec<String>) {
     let mut req = get_client().list_objects_v2().bucket(bucket);
     if let Some(d) = delimiter {
@@ -119,7 +120,7 @@ async fn list(bucket: &str, delimiter: Option<&str>)
 
 /// A bucket holding `seen`, PUT and then listed, so that its listing
 /// cache is filled before the test changes anything.
-async fn listed_bucket() -> String {
+pub(crate) async fn listed_bucket() -> String {
     let bucket = get_new_bucket(Some(&get_client())).await;
     put(&bucket, "seen", "seen").await;
     let (keys, _) = list(&bucket, None).await;
@@ -151,13 +152,15 @@ async fn test_sideloaded_before_the_first_listing_is_listed_and_read() {
 
 /// A file written after the bucket was listed is in its next listing.
 #[cfg_attr(not(feature = "rgw_admin"), ignore = "requires rgw_admin feature")]
-#[cfg_attr(feature = "fails_on_nsfs",
-           ignore = "nsfs: the listing cache does not revalidate (DECISIONS 2026-11-11)")]
 #[tokio::test]
 async fn test_sideloaded_after_a_listing_is_listed() {
     let _guard = TestGuard::setup();
     if !nsfs_only().await {
         eprintln!("not nsfs;  nothing to check");
+        return;
+    }
+    if !feature("listing_revalidate").await {
+        eprintln!("the gateway trusts its listing cache;  nothing to check");
         return;
     }
     let bucket = listed_bucket().await;
@@ -174,13 +177,15 @@ async fn test_sideloaded_after_a_listing_is_listed() {
 /// listed, is in its next listing, and a delimited listing shows the new
 /// top directory as a common prefix.
 #[cfg_attr(not(feature = "rgw_admin"), ignore = "requires rgw_admin feature")]
-#[cfg_attr(feature = "fails_on_nsfs",
-           ignore = "nsfs: the listing cache does not revalidate (DECISIONS 2026-11-11)")]
 #[tokio::test]
 async fn test_sideloaded_under_new_directories_after_a_listing_is_listed() {
     let _guard = TestGuard::setup();
     if !nsfs_only().await {
         eprintln!("not nsfs;  nothing to check");
+        return;
+    }
+    if !feature("listing_revalidate").await {
+        eprintln!("the gateway trusts its listing cache;  nothing to check");
         return;
     }
     let bucket = listed_bucket().await;
@@ -217,13 +222,15 @@ async fn test_removed_outside_reads_as_no_such_key() {
 /// A file removed outside, after the bucket was listed, is gone from its
 /// next listing.
 #[cfg_attr(not(feature = "rgw_admin"), ignore = "requires rgw_admin feature")]
-#[cfg_attr(feature = "fails_on_nsfs",
-           ignore = "nsfs: the listing cache does not revalidate (DECISIONS 2026-11-11)")]
 #[tokio::test]
 async fn test_removed_outside_after_a_listing_is_not_listed() {
     let _guard = TestGuard::setup();
     if !nsfs_only().await {
         eprintln!("not nsfs;  nothing to check");
+        return;
+    }
+    if !feature("listing_revalidate").await {
+        eprintln!("the gateway trusts its listing cache;  nothing to check");
         return;
     }
     let bucket = listed_bucket().await;
@@ -240,13 +247,15 @@ async fn test_removed_outside_after_a_listing_is_not_listed() {
 /// A file written outside under a temporary name and then renamed, as
 /// Samba and rsync write, is listed under its final name only.
 #[cfg_attr(not(feature = "rgw_admin"), ignore = "requires rgw_admin feature")]
-#[cfg_attr(feature = "fails_on_nsfs",
-           ignore = "nsfs: the listing cache does not revalidate (DECISIONS 2026-11-11)")]
 #[tokio::test]
 async fn test_renamed_outside_after_a_listing_is_listed_by_its_new_name() {
     let _guard = TestGuard::setup();
     if !nsfs_only().await {
         eprintln!("not nsfs;  nothing to check");
+        return;
+    }
+    if !feature("listing_revalidate").await {
+        eprintln!("the gateway trusts its listing cache;  nothing to check");
         return;
     }
     let bucket = listed_bucket().await;
@@ -305,29 +314,6 @@ async fn test_an_object_overwritten_in_place_reads_its_new_contents() {
     }
     assert_eq!(body(&bucket, "seen").await, "rewritten outside");
     assert_eq!(head(&bucket, "seen").await.0, 17);
-}
-
-/// An object overwritten in place outside, after the bucket was listed,
-/// is listed with its new size.  With the revalidation option a listing
-/// checks an entry at most once per interval, so this will run where the
-/// interval is 0 and skip elsewhere.
-#[cfg_attr(not(feature = "rgw_admin"), ignore = "requires rgw_admin feature")]
-#[cfg_attr(feature = "fails_on_nsfs",
-           ignore = "nsfs: the listing cache does not revalidate (DECISIONS 2026-11-11)")]
-#[tokio::test]
-async fn test_overwritten_in_place_after_a_listing_is_listed_with_its_new_size() {
-    let _guard = TestGuard::setup();
-    if !nsfs_only().await {
-        eprintln!("not nsfs;  nothing to check");
-        return;
-    }
-    let bucket = listed_bucket().await;
-    if write(&bucket, "seen", "rewritten outside").await.is_none() {
-        eprintln!("sideload hint unavailable;  nothing to check");
-        return;
-    }
-    let (keys, _) = list(&bucket, None).await;
-    assert_eq!(keys.get("seen"), Some(&17), "listing: {keys:?}");
 }
 
 /// An object carrying a stored digest keeps that ETag after an in-place

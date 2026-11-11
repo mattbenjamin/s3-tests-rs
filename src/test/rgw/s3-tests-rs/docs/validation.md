@@ -84,15 +84,17 @@ than `plain` run with the default bucket profile, `shared`.
 
 ### 2.  Switches tested inside a deployment
 
-Three settings are daemon-wide and are switched by a driver hint for
+Four settings are daemon-wide and are switched by a driver hint for
 the length of one profile.  Each profile runs after `baseline` in each
-impersonated fresh deployment, against the same gateway:
+impersonated fresh deployment, against the same gateway, and
+`listing-intervals` in `plain` as well:
 
 | setting | profile | what it checks |
 |---|---|---|
 | the access model | `access-model-switch` | that the bytes follow the filesystem under the model, then switches to the other and checks the same read is served |
 | `rgw_nsfs_dynamic_supplemental_groups` | `dynamic-groups`, then `dynamic-groups-membership` after `gpasswd -d` | that an identity with no group list takes its Unix groups, and follows a change of membership |
 | `rgw_nsfs_role_identity_override` | `role-identity` | that a role given a row runs as it, and its new buckets follow it, and otherwise as its account |
+| the listing cache's revalidation intervals | `listing-intervals` | that an object overwritten in place outside the gateway is listed as it is within the entry interval, and a file created outside beside the gateway's own write within the provisional interval;  each shortens its interval to a second through the `listing-intervals` hint, which lapses by itself |
 
 So each is tested under both access models and all four settings of the
 two overrides.  The role override is also a dimension (1, above):

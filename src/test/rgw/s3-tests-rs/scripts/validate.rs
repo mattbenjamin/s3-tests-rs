@@ -147,7 +147,8 @@ const CELLS: &[Cell] = &[
            suites: &[Suite::Profile("baseline"),
                      Suite::Profile("access-model-switch"),
                      Suite::DynamicGroups,
-                     Suite::Profile("role-identity")],
+                     Suite::Profile("role-identity"),
+                     Suite::Profile("listing-intervals")],
            by_default: true },
     Cell { name: "s3-native", overrides: true,
            vstart: &["--store", "nsfs", "--with-impersonation",
@@ -155,7 +156,8 @@ const CELLS: &[Cell] = &[
            suites: &[Suite::Profile("baseline"),
                      Suite::Profile("access-model-switch"),
                      Suite::DynamicGroups,
-                     Suite::Profile("role-identity")],
+                     Suite::Profile("role-identity"),
+                     Suite::Profile("listing-intervals")],
            by_default: true },
     /* the web identity tests against a Keycloak IdP, under each access
      * model.  Off by default, since the IdP needs podman.  Before `plain`,
@@ -173,7 +175,8 @@ const CELLS: &[Cell] = &[
     Cell { name: "plain", overrides: true,
            vstart: &["--store", "nsfs", "--bucket-profile", "strong", "--clean",
                      "-o", KAFKA_CONFIG_KEYS],
-           suites: &[Suite::Profile("baseline"), Suite::Librgw],
+           suites: &[Suite::Profile("baseline"), Suite::Profile("listing-intervals"),
+                     Suite::Librgw],
            by_default: true },
     /* the adoption corpus:  NooBaa writes a tree, RGW captures it before
      * and after conversion, and the captures are compared -- with RGW
