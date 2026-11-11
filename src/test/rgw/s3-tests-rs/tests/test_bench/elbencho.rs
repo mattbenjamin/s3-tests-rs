@@ -14,6 +14,13 @@ struct ElbenchoOpts {
     block_size: String,
     bucket: &'static str,
     phases: &'static [&'static str],
+    /* List the bucket before the workload.  A filesystem driver's
+     * listing cache holds a bucket only once it has been listed, and
+     * only then does every write update it;  a bucket never listed
+     * measures the write path without the cache.  elbencho lists after
+     * it writes, whatever the order of the options, so the listing is a
+     * step of its own. */
+    listed: bool,
 }
 
 impl ElbenchoOpts {
@@ -30,6 +37,7 @@ impl ElbenchoOpts {
             block_size: env_or("BENCH_BLOCK_SIZE", "4k"),
             bucket: "benchsmall1",
             phases: &["-w", "-r", "-F", "-D"],
+            listed: false,
         }
     }
 
@@ -46,6 +54,7 @@ impl ElbenchoOpts {
             block_size: env_or("BENCH_BLOCK_SIZE", &bench.default_block_size),
             bucket: "benchlarge1",
             phases: &["-w", "-r", "-F", "-D"],
+            listed: false,
         }
     }
 
@@ -62,6 +71,7 @@ impl ElbenchoOpts {
             block_size: env_or("BENCH_BLOCK_SIZE", "512k"),
             bucket: "benchsmallsoak1",
             phases: &["-w"],
+            listed: false,
         }
     }
 
@@ -78,6 +88,7 @@ impl ElbenchoOpts {
             block_size: env_or("BENCH_BLOCK_SIZE", &bench.default_block_size),
             bucket: "benchsoak1",
             phases: &["-w"],
+            listed: false,
         }
     }
 
@@ -94,7 +105,19 @@ impl ElbenchoOpts {
             block_size: env_or("BENCH_BLOCK_SIZE", "1m"),
             bucket: "benchmixed1",
             phases: &["-w", "-r", "-F", "-D"],
+            listed: false,
         }
+    }
+}
+
+impl ElbenchoOpts {
+    /// The same workload against a bucket listed first, under its own
+    /// label and bucket.
+    fn listed(mut self, label: &'static str, bucket: &'static str) -> Self {
+        self.label = label;
+        self.bucket = bucket;
+        self.listed = true;
+        self
     }
 }
 
@@ -117,6 +140,21 @@ fn run_elbencho(opts: &ElbenchoOpts) {
     // remove stale results
     let _ = std::fs::remove_file(&json_path);
 
+    if opts.listed {
+        /* create the bucket and list it, one thread, no objects */
+        let out = Command::new(&bench.elbencho_bin)
+            .arg("--s3endpoints").arg(&endpoint)
+            .arg("--s3key").arg(&cfg.main_access_key)
+            .arg("--s3secret").arg(&cfg.main_secret_key)
+            .arg("-t").arg("1")
+            .arg("-d")
+            .arg("--s3listobj").arg("1")
+            .arg(opts.bucket)
+            .output().expect("failed to execute elbencho");
+        assert!(out.status.success(), "bench::{}: listing the bucket first failed:\n{}",
+                opts.label, String::from_utf8_lossy(&out.stderr));
+    }
+
     let mut cmd = Command::new(&bench.elbencho_bin);
     cmd.arg("--s3endpoints").arg(&endpoint)
        .arg("--s3key").arg(&cfg.main_access_key)
@@ -135,9 +173,9 @@ fn run_elbencho(opts: &ElbenchoOpts) {
         cmd.arg(arg);
     }
 
-    eprintln!("bench::{}: threads={} dirs={} files={} size={} phases={:?}",
+    eprintln!("bench::{}: threads={} dirs={} files={} size={} phases={:?} listed={}",
         opts.label, opts.threads, opts.num_dirs,
-        opts.num_files, opts.file_size, opts.phases);
+        opts.num_files, opts.file_size, opts.phases, opts.listed);
 
     let output = cmd.output().expect("failed to execute elbencho");
     let code = output.status.code().unwrap_or(-1);
@@ -154,25 +192,25 @@ fn run_elbencho(opts: &ElbenchoOpts) {
         "bench::{} failed (exit {}):\n{}", opts.label, code, stderr);
 }
 
+/// elbencho's `--jsonfile` holds one JSON object per phase, a line each:
+/// `phase_type`, and the results when the last worker finished under
+/// `last_done`, every number a string.
 fn report_json_results(label: &str, json_str: &str) {
-    let parsed: Result<serde_json::Value, _> = serde_json::from_str(json_str);
-    let Ok(val) = parsed else { return };
-
-    let phases = match val.as_array() {
-        Some(arr) => arr,
-        None => return,
+    let num = |v: &serde_json::Value, k: &str| -> Option<f64> {
+        v.get(k).and_then(|x| x.as_str()).and_then(|x| x.parse().ok())
     };
-
-    for phase in phases {
-        let op = phase.get("operation").and_then(|v| v.as_str()).unwrap_or("?");
-        let mib_ps = phase.get("MiB/s").and_then(|v| v.as_f64());
-        let iops = phase.get("IOPS").and_then(|v| v.as_f64());
-        let entries = phase.get("entries").and_then(|v| v.as_u64());
+    for line in json_str.lines().filter(|l| !l.trim().is_empty()) {
+        let Ok(phase) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let op = phase.get("phase_type").and_then(|v| v.as_str()).unwrap_or("?");
+        let Some(done) = phase.get("last_done") else { continue };
 
         let mut parts = vec![format!("bench::{label} [{op}]:")];
-        if let Some(v) = mib_ps { parts.push(format!("{v:.1} MiB/s")); }
-        if let Some(v) = iops { parts.push(format!("{v:.0} IOPS")); }
-        if let Some(v) = entries { parts.push(format!("{v} entries")); }
+        if let Some(v) = num(done, "bytes/s") { parts.push(format!("{:.1} MiB/s", v / 1048576.0)); }
+        if let Some(v) = num(done, "iops") { parts.push(format!("{v:.0} IOPS")); }
+        if let Some(v) = num(done, "entries") { parts.push(format!("{v:.0} entries")); }
+        if let Some(v) = num(done, "elapsed_time_ms") { parts.push(format!("{v:.0} ms")); }
 
         eprintln!("{}", parts.join("  "));
     }
@@ -185,6 +223,16 @@ fn report_json_results(label: &str, json_str: &str) {
 fn bench_smoke_small_objects() {
     let cfg = get_config();
     run_elbencho(&ElbenchoOpts::smoke_small(&cfg.bench));
+}
+
+/// Small objects written to a bucket listed first, so every write
+/// updates the listing cache.
+#[test]
+#[ignore = "bench: requires elbencho"]
+fn bench_smoke_small_objects_listed() {
+    let cfg = get_config();
+    run_elbencho(&ElbenchoOpts::smoke_small(&cfg.bench)
+                 .listed("smoke_small_listed", "benchsmalllisted1"));
 }
 
 #[test]
@@ -217,6 +265,7 @@ fn bench_smoke_mixed_sizes() {
             block_size: bsize.to_string(),
             bucket: "benchmixed1",
             phases: &["-w", "-r", "-F", "-D"],
+            listed: false,
         });
     }
 }
@@ -235,6 +284,15 @@ fn bench_soak_saturation() {
 fn bench_soak_small_objects() {
     let cfg = get_config();
     run_elbencho(&ElbenchoOpts::soak_small_objects(&cfg.bench));
+}
+
+/// The small-object soak against a bucket listed first.
+#[test]
+#[ignore = "bench: requires elbencho, long-running"]
+fn bench_soak_small_objects_listed() {
+    let cfg = get_config();
+    run_elbencho(&ElbenchoOpts::soak_small_objects(&cfg.bench)
+                 .listed("soak_small_objects_listed", "benchsmallsoaklisted1"));
 }
 
 #[test]
