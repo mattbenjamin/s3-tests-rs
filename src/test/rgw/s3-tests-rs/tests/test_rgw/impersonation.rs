@@ -19,7 +19,7 @@ use s3_tests_rs::features::{cross_account_data, features};
 use s3_tests_rs::fixtures::{
     check_configure_versioning_retry, get_new_bucket, PrivateUser, TestGuard,
 };
-use s3_tests_rs::hints::{clear_hint, with_hint};
+use s3_tests_rs::hints::with_hint;
 use s3_tests_rs::policy::{make_arn_resource, make_json_policy};
 
 const GID_SHARED: &str = "70010";
@@ -1320,14 +1320,12 @@ async fn test_the_non_md5_etag_is_recorded_as_the_authenticated_user() {
             head.e_tag().unwrap_or_default().to_string()))
     }
 
-    /* On the way in, because a hint is gateway-wide:  one left behind
-     * by a test the harness killed would otherwise decide this one's
-     * result.  `with_hint` covers the panicking path;  nothing covers
-     * a process that dies without unwinding. */
-    clear_hint(INJECT).await;
+    /* The hint is armed for this test's own bucket, which is new, so
+     * no other test's hint can reach it and none needs clearing on the
+     * way in. */
     let fixed = put_then_head(&alice, &bucket, "recorded").await;
 
-    let injected = with_hint(INJECT, &[("enable", "true")],
+    let injected = with_hint(INJECT, &[("enable", "true"), ("bucket", &bucket)],
                              put_then_head(&alice, &bucket, "diverged")).await;
 
 

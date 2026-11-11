@@ -1,10 +1,10 @@
 //! Driver hints that cannot outlive the test that set one.
 //!
-//! A hint is gateway-wide.  `inject-etag-as-gateway` or
-//! `access-model` applies to every request the daemon serves, not to
-//! the connection that asked for it -- so a test which dies between
-//! setting one and putting it back leaves the whole run measuring a
-//! gateway nobody configured.  That is not hypothetical:  on
+//! A hint lives in the gateway, not the connection that set it.
+//! `access-model` applies to every request the daemon serves, and a
+//! scoped one, such as `inject-etag-as-gateway` (by `bucket`), to every
+//! request in its scope -- so a test which dies between setting one and
+//! putting it back leaves the run measuring a gateway nobody configured.  That is not hypothetical:  on
 //! 2026-10-17 a test panicked inside an injected window, the flag
 //! stayed on, and the *next* run failed on its first object for a
 //! reason nothing in that run had done.
@@ -32,7 +32,9 @@ use futures_util::FutureExt;
 use crate::admin::driver_hint_results;
 
 /// Turn a hint on, run `body`, turn it off -- including when `body`
-/// panics, after which the panic continues on its way.
+/// panics, after which the panic continues on its way.  The clear sends
+/// `params` as the set did, with `enable` false, so a scoped hint is
+/// cleared in its scope.
 ///
 /// The return value is the body's, so a test reads as it would
 /// without the hint.  A gateway with no such hint is not an error
@@ -45,7 +47,10 @@ where
 {
     let _ = driver_hint_results(hint, params).await;
     let out = AssertUnwindSafe(body).catch_unwind().await;
-    let _ = driver_hint_results(hint, &[("enable", "false")]).await;
+    let mut clear: Vec<(&str, &str)> =
+        params.iter().copied().filter(|(k, _)| *k != "enable").collect();
+    clear.push(("enable", "false"));
+    let _ = driver_hint_results(hint, &clear).await;
     match out {
         Ok(v) => v,
         Err(panic) => resume_unwind(panic),
