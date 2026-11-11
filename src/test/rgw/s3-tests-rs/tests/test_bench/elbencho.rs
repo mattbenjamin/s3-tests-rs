@@ -160,8 +160,9 @@ fn run_elbencho(opts: &ElbenchoOpts) {
        .arg("--s3key").arg(&cfg.main_access_key)
        .arg("--s3secret").arg(&cfg.main_secret_key)
        .arg("-t").arg(opts.threads.to_string())
-       .arg("-N").arg(opts.num_dirs.to_string())
-       .arg("-n").arg(opts.num_files.to_string())
+       /* elbencho:  -n directories per thread, -N files per directory */
+       .arg("-n").arg(opts.num_dirs.to_string())
+       .arg("-N").arg(opts.num_files.to_string())
        .arg("-s").arg(&opts.file_size)
        .arg("-b").arg(&opts.block_size)
        .arg("--mkdirs")
