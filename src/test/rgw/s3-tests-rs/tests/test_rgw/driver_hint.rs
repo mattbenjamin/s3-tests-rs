@@ -30,12 +30,16 @@ const UID_BUFCOPY: &str = "70101";
 const GID_BUFCOPY: &str = "70010";
 
 /// Both surfaces read the same `get_features()`, so a disagreement means
-/// one of them is rendering it wrong.
+/// one of them is rendering it wrong.  Some values are live counts --
+/// `hint_unmarked_buckets` -- which tests running beside this one change,
+/// so `/admin/features` is read before and after the hint, and a value
+/// the two reads give differently moved meanwhile and is not compared.
 #[cfg_attr(not(feature = "rgw_admin"), ignore = "requires rgw_admin feature")]
 #[tokio::test]
 async fn test_driver_hint_results_round_trip() {
     let _guard = TestGuard::setup();
 
+    let before = features().await;
     let Some(results) = driver_hint_results("fs-features", &[]).await else {
         eprintln!("driver hint endpoint unavailable;  nothing to check");
         return;
@@ -44,13 +48,16 @@ async fn test_driver_hint_results_round_trip() {
     assert!(!results.is_empty(),
         "fs-features answered with no results at all");
 
-    let Some(f) = features().await else {
+    let (Some(before), Some(after)) = (before, features().await) else {
         eprintln!("no features reported;  cross-check skipped");
         return;
     };
     for (k, v) in &results {
-        if let Some(fv) = f.get_str(k) {
-            assert_eq!(fv, v,
+        if let (Some(b), Some(a)) = (before.get_str(k), after.get_str(k)) {
+            if b != a {
+                continue;
+            }
+            assert_eq!(b, v,
                 "/admin/features and the fs-features hint disagree on {k}");
         }
     }
