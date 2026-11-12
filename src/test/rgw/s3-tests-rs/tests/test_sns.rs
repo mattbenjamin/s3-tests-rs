@@ -7,14 +7,24 @@
 //!
 //! The rest derive from the Ceph RGW notification test program
 //! `src/test/rgw/bucket_notification/test_bn.py`, which is 87 tests
-//! across AMQP, Kafka, persistent topics and multisite.  These are the
-//! Kafka subset, renamed to `test_notification_kafka_*` because the
-//! correspondence is by behaviour rather than one-to-one:  filters,
-//! event fields, multipart, copy, multi-delete, topic attributes.
-//! Persistent topics, AMQP and multisite are deliberately not ported.
-//! The Kafka tests need a Kafka broker, and are gated behind
-//! `has_kafka`.  `rgw-vstart.sh --with-kafka` starts one where they look
-//! by default;  `[kafka] broker` in the config names another.
+//! across AMQP, Kafka, persistent topics and multisite.  Persistent
+//! topics, AMQP and multisite are deliberately not ported.  `bn` holds
+//! what its tests share, its verifier among them.
+//!
+//! Its Kafka tests whose topics are not persistent, in `kafka_tests`,
+//! keep their names and its verifier:  `test_notification_kafka`, the
+//! two multiple-broker variants, `test_multipart_kafka` and
+//! `test_notification_kafka_idle_behaviour`.  The last sets the idle
+//! time and counts the gateway's connections through the `kafka-idle`
+//! hint, which RGW serves itself, where test_bn.py uses the monitor and
+//! `ss`;  it runs alone, in the `kafka-idle` profile.  Its SSL and SASL
+//! tests wait on a broker `kafka-vstart.sh` can configure for them.
+//! The other `test_notification_kafka_*` tests are scenarios of our
+//! own -- filters, event fields, copy, multi-delete, topic attributes
+//! -- whose events pass the same per-record checks.  The Kafka tests
+//! need a Kafka broker, and are gated behind `has_kafka`.
+//! `rgw-vstart.sh --with-kafka` starts one where they look by default;
+//! `[kafka] broker` in the config names another.
 //!
 //! The HTTP subset of the same program, in `http_tests`, keeps its
 //! names:  the five tests whose topics are not persistent, against an
@@ -304,6 +314,7 @@ mod kafka_tests {
                                     let event_name = record["eventName"]
                                         .as_str().unwrap_or("");
                                     if obj_key == key && event_name.starts_with(event_prefix) {
+                                        super::bn::check_record(record);
                                         return event;
                                     }
                                 }
@@ -314,6 +325,337 @@ mod kafka_tests {
                 }
             }
         }).await.expect("timed out waiting for Kafka notification")
+    }
+
+    /* test_bn.py's KafkaReceiver:  the topic created on `brokers` (one
+     * partition, already existing is fine), and a consumer from its
+     * earliest offset storing every message, each a Records list, until
+     * dropped */
+    struct KafkaReceiver {
+        topic: String,
+        brokers: String,
+        events: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl KafkaReceiver {
+        async fn start(topic: &str, brokers: &str) -> Self {
+            use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+            use rdkafka::client::DefaultClientContext;
+            use rdkafka::types::RDKafkaErrorCode;
+
+            let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+                .set("bootstrap.servers", brokers)
+                .create()
+                .expect("failed to create a Kafka admin client");
+            let mut remaining_retries = 10;
+            loop {
+                let made = admin.create_topics(
+                    &[NewTopic::new(topic, 1, TopicReplication::Fixed(1))],
+                    &AdminOptions::new().request_timeout(Some(Duration::from_secs(16))),
+                ).await;
+                match made.as_deref() {
+                    Ok([Ok(_)]) | Ok([Err((_, RDKafkaErrorCode::TopicAlreadyExists))]) => break,
+                    other => {
+                        remaining_retries -= 1;
+                        assert!(remaining_retries > 0,
+                                "Kafka admin failed to create topic: {topic}. no retries left:  {other:?}");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+
+            let consumer: StreamConsumer = ClientConfig::new()
+                .set("bootstrap.servers", brokers)
+                .set("group.id", format!("s3tests-{}", rand::random::<u32>()))
+                .set("auto.offset.reset", "earliest")
+                .set("enable.auto.commit", "false")
+                .set("topic.metadata.refresh.interval.ms", "5000")
+                .create()
+                .expect("failed to create Kafka consumer");
+            consumer.subscribe(&[topic]).expect("failed to subscribe to topic");
+            let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let store = events.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    match consumer.recv().await {
+                        Ok(m) => {
+                            if let Some(v) = m.payload()
+                                .and_then(|p| serde_json::from_slice::<serde_json::Value>(p).ok())
+                            {
+                                store.lock().unwrap().push(v);
+                            }
+                        }
+                        Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                    }
+                }
+            });
+            Self { topic: topic.to_string(), brokers: brokers.to_string(), events, task }
+        }
+
+        /* get_and_reset_events() */
+        fn take(&self) -> Vec<serde_json::Value> {
+            std::mem::take(&mut *self.events.lock().unwrap())
+        }
+
+        /* verify_kafka_receiver():  a message produced to the topic is
+         * the one message received, within ten seconds */
+        async fn verify(&self) {
+            use rdkafka::producer::{FutureProducer, FutureRecord};
+            let producer: FutureProducer = ClientConfig::new()
+                .set("bootstrap.servers", &self.brokers)
+                .create()
+                .expect("failed to create a Kafka producer");
+            let payload = serde_json::json!({"test": "message"}).to_string();
+            producer.send(FutureRecord::<(), _>::to(&self.topic).payload(&payload),
+                          Duration::from_secs(10))
+                .await.expect("the test message was not produced");
+            let mut events = Vec::new();
+            let mut remaining_retries = 10;
+            while events.is_empty() {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                events = self.take();
+                remaining_retries -= 1;
+                assert!(remaining_retries > 0 || !events.is_empty(),
+                        "kafka receiver on topic: {} did not receive test event in time", self.topic);
+            }
+            assert_eq!(events.len(), 1);
+            assert!(events[0].get("test").is_some());
+        }
+    }
+
+    impl Drop for KafkaReceiver {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    /* PUT each (name, content) concurrently, as test_bn.py's threads do */
+    async fn put_all(s3: &aws_sdk_s3::Client, bucket: &str, objects: Vec<(String, Vec<u8>)>) {
+        let mut puts = Vec::new();
+        for (name, content) in objects {
+            let (s3, bucket) = (s3.clone(), bucket.to_string());
+            puts.push(tokio::spawn(async move {
+                s3.put_object().bucket(&bucket).key(&name)
+                    .body(ByteStream::from(content)).send().await.unwrap();
+            }));
+        }
+        for p in puts {
+            p.await.unwrap();
+        }
+    }
+
+    /* delete each key concurrently */
+    async fn delete_all(s3: &aws_sdk_s3::Client, bucket: &str, keys: &[(String, String)]) {
+        let mut deletes = Vec::new();
+        for (name, _) in keys {
+            let (s3, bucket, name) = (s3.clone(), bucket.to_string(), name.clone());
+            deletes.push(tokio::spawn(async move {
+                s3.delete_object().bucket(&bucket).key(&name).send().await.unwrap();
+            }));
+        }
+        for d in deletes {
+            d.await.unwrap();
+        }
+    }
+
+    /* `n` objects named 0..n of 1 MiB each, their MD5s and sizes */
+    fn objects_of_1mib(n: usize) -> (Vec<(String, Vec<u8>)>, Vec<String>,
+                                     std::collections::HashMap<String, u64>) {
+        let mut objects = Vec::new();
+        let mut etags = Vec::new();
+        let mut sizes = std::collections::HashMap::new();
+        for i in 0..n {
+            let content = super::bn::random_content(1024 * 1024);
+            etags.push(super::bn::md5_hex(&content));
+            sizes.insert(i.to_string(), content.len() as u64);
+            objects.push((i.to_string(), content));
+        }
+        (objects, etags, sizes)
+    }
+
+    /* the broker's host, for the addresses test_bn.py builds on
+     * default_kafka_server */
+    fn broker_host(broker: &str) -> &str {
+        broker.rsplit_once(':').map_or(broker, |(h, _)| h)
+    }
+
+    /* notification('kafka', conn, kafka_brokers=...):  with brokers, the
+     * topic's kafka-brokers is them and the default broker */
+    async fn notification_kafka(kafka_brokers: Option<String>) {
+        use super::bn::*;
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        let s3 = get_iam_root_s3client();
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let topic_name = format!("{bucket}_topic");
+
+        let default_broker = get_kafka_broker();
+        let kafka_brokers = kafka_brokers.map(|b| format!("{b},{default_broker}"));
+        let receiver = KafkaReceiver::start(
+            &topic_name, kafka_brokers.as_deref().unwrap_or(&default_broker)).await;
+        receiver.verify().await;
+        let mut attrs = vec![("kafka-ack-level", "broker")];
+        if let Some(b) = kafka_brokers.as_deref() {
+            attrs.push(("kafka-brokers", b));
+        }
+        let topic_arn = topic_and_notification(&sns, &s3, &bucket, "",
+            &format!("kafka://{default_broker}"), &attrs, vec![]).await;
+
+        let (objects, etags, sizes) = objects_of_1mib(100);
+        put_all(&s3, &bucket, objects).await;
+        wait_for_the_messages().await;
+
+        let keys = list_keys(&s3, &bucket).await;
+        let md5 = !s3_tests_rs::features::non_md5_etag().await;
+        verify_records(&receiver.take(), &bucket, &keys, true, false, Some(&sizes),
+                       md5.then_some(etags.as_slice()));
+
+        delete_all(&s3, &bucket, &keys).await;
+        wait_for_the_messages().await;
+        verify_records(&receiver.take(), &bucket, &keys, true, true, Some(&sizes),
+                       md5.then_some(etags.as_slice()));
+
+        remove_notifications(&s3, &bucket).await;
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_notification_kafka() {
+        notification_kafka(None).await;
+    }
+
+    /* nothing listens on :9091, so delivery fails over to :9092 */
+    #[tokio::test]
+    async fn test_notification_kafka_multiple_brokers_override() {
+        let host = broker_host(&get_kafka_broker()).to_string();
+        notification_kafka(Some(format!("{host}:9091,{host}:9092"))).await;
+    }
+
+    #[tokio::test]
+    async fn test_notification_kafka_multiple_brokers_append() {
+        let host = broker_host(&get_kafka_broker()).to_string();
+        notification_kafka(Some(format!("{host}:9091"))).await;
+    }
+
+    /* multipart_endpoint_agnostic('kafka', conn):  despite the name, one
+     * 20 MiB PUT, as boto2's set_contents_from_string is */
+    #[tokio::test]
+    async fn test_multipart_kafka() {
+        use super::bn::*;
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let sns = get_sns_root_client();
+        let s3 = get_iam_root_s3client();
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let broker = get_kafka_broker();
+        let receiver = KafkaReceiver::start(&format!("{bucket}_topic"), &broker).await;
+        receiver.verify().await;
+        let topic_arn = topic_and_notification(&sns, &s3, &bucket, "",
+            &format!("kafka://{broker}"), &[("kafka-ack-level", "broker")], vec![]).await;
+
+        s3.put_object().bucket(&bucket).key("obj")
+            .body(ByteStream::from(random_content(20 * 1024 * 1024))).send().await.unwrap();
+        wait_for_the_messages().await;
+
+        let keys = list_keys(&s3, &bucket).await;
+        verify_records(&receiver.take(), &bucket, &keys, true, false, None, None);
+
+        remove_notifications(&s3, &bucket).await;
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        for (name, _) in keys {
+            s3.delete_object().bucket(&bucket).key(&name).send().await.unwrap();
+        }
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
+    /* the gateway's open Kafka connections, through the kafka-idle hint;
+     * with `seconds`, rgw_kafka_connection_idle is set first.  None where
+     * the gateway serves no such hint */
+    async fn kafka_idle(seconds: Option<u64>) -> Option<u64> {
+        let s = seconds.map(|s| s.to_string());
+        let params: Vec<(&str, &str)> = s.as_deref().map(|s| ("seconds", s)).into_iter().collect();
+        let out = s3_tests_rs::admin::driver_hint_results("kafka-idle", &params).await?;
+        out.get("connections").and_then(|c| c.parse().ok())
+    }
+
+    /* verify_idleness(port, sleep_time, max_time):  rgw_kafka_connection_idle
+     * set to `max_time`, the gateway's connections polled every
+     * `sleep_time` until none is open, and the option set back to 300.
+     * test_bn.py sets it through the monitor and reads the connections
+     * with `ss -tnp | grep radosgw`;  the kafka-idle hint does both from
+     * the gateway itself */
+    async fn verify_idleness(sleep_time: u64, max_time: u64) {
+        kafka_idle(Some(max_time)).await.expect("the kafka-idle hint");
+        let start = std::time::Instant::now();
+        loop {
+            tokio::time::sleep(Duration::from_secs(sleep_time)).await;
+            let open = kafka_idle(None).await.expect("the kafka-idle hint");
+            if open == 0 {
+                break;
+            }
+            let time_diff = start.elapsed().as_secs();
+            assert!(time_diff <= max_time + sleep_time,
+                    "radosgw<->kafka connection is still not idle after {time_diff}s:  \
+                     {open} open");
+        }
+        kafka_idle(Some(300)).await.expect("the kafka-idle hint");
+    }
+
+    /* the two rounds of test_notification_kafka_idle_behaviour:  10 PUTs
+     * and their events, 10 DELETEs and theirs */
+    async fn idle_round(s3: &aws_sdk_s3::Client, bucket: &str, receiver: &KafkaReceiver) {
+        use super::bn::*;
+        let (objects, etags, _) = objects_of_1mib(10);
+        put_all(s3, bucket, objects).await;
+        wait_for_the_messages().await;
+        let keys = list_keys(s3, bucket).await;
+        let md5 = !s3_tests_rs::features::non_md5_etag().await;
+        verify_records(&receiver.take(), bucket, &keys, true, false, None,
+                       md5.then_some(etags.as_slice()));
+
+        delete_all(s3, bucket, &keys).await;
+        wait_for_the_messages().await;
+        verify_records(&receiver.take(), bucket, &keys, true, true, None,
+                       md5.then_some(etags.as_slice()));
+    }
+
+    /* The gateway closes an idle connection to the broker, and delivers
+     * on a new one after.  The kafka-idle hint sets the idle time and
+     * counts the connections, so it runs alone, in its own profile
+     * (kafka-idle):  any other Kafka test keeps the gateway's connection
+     * busy.  **Added:**  that the gateway holds a connection before the
+     * wait, without which the wait would pass with nothing to close. */
+    #[cfg_attr(not(feature = "rgw_admin"), ignore = "requires rgw_admin feature")]
+    #[tokio::test]
+    async fn test_notification_kafka_idle_behaviour() {
+        use super::bn::*;
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        if kafka_idle(None).await.is_none() {
+            eprintln!("the gateway serves no kafka-idle hint;  nothing to check");
+            return;
+        }
+        let sns = get_sns_root_client();
+        let s3 = get_iam_root_s3client();
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let broker = get_kafka_broker();
+        let receiver = KafkaReceiver::start(&format!("{bucket}_topic_1"), &broker).await;
+        receiver.verify().await;
+        let topic_arn = topic_and_notification(&sns, &s3, &bucket, "_1",
+            &format!("kafka://{broker}"), &[("kafka-ack-level", "broker")], vec![]).await;
+
+        idle_round(&s3, &bucket, &receiver).await;
+        assert!(kafka_idle(None).await.unwrap_or(0) > 0,
+                "the gateway holds no connection to the broker");
+        verify_idleness(10, 30).await;
+        idle_round(&s3, &bucket, &receiver).await;
+
+        remove_notifications(&s3, &bucket).await;
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
     }
 
     #[tokio::test]
@@ -566,8 +908,8 @@ mod kafka_tests {
         assert_eq!(record["s3"]["object"]["size"].as_u64().unwrap(), body.len() as u64);
         assert!(!record["s3"]["object"]["eTag"].as_str().unwrap_or("").is_empty());
         assert!(!record["userIdentity"]["principalId"].as_str().unwrap_or("").is_empty());
-        assert!(!record["requestParameters"]["sourceIPAddress"].as_str().unwrap_or("").is_empty()
-            || record["userIdentity"]["principalId"].as_str().is_some());
+        assert!(!record["requestParameters"]["sourceIPAddress"].as_str().unwrap_or("").is_empty(),
+                "no sourceIPAddress:  {record}");
 
         nuke_topics(&sns, &get_topic_prefix()).await;
     }
@@ -2180,52 +2522,45 @@ mod topic_config_tests {
     }
 }
 
-/* The HTTP subset of test_bn.py, against an endpoint in the test process
- * (s3_tests_rs::notify_receiver).  The five tests whose topics are not
- * persistent;  test_lifecycle_http, test_lifecycle_abort_mpu and
- * test_metadata_filter_http make theirs persistent and wait on the
- * queue, so they go with persistent delivery (work plan, Future work 6).
- * Each keeps test_bn.py's name. */
-mod http_tests {
+/* What test_bn.py's tests share, for every endpoint:  its content, its
+ * topic and notification, its bucket.list(), and its verifier. */
+mod bn {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use aws_sdk_s3::primitives::ByteStream;
-    use aws_sdk_s3::types::{Delete, NotificationConfiguration, ObjectIdentifier,
-                            TopicConfiguration};
+    use aws_sdk_s3::types::{NotificationConfiguration, TopicConfiguration};
     use md5::{Digest, Md5};
-    use rand::{Rng, RngCore};
+    use rand::RngCore;
 
-    use s3_tests_rs::client::{get_iam_root_s3client, get_sns_root_client};
-    use s3_tests_rs::fixtures::get_new_bucket_name;
-    use s3_tests_rs::notify_receiver::{HttpReceiver, Received};
-
-    const META_PREFIX: &str = "x-amz-meta-";
+    pub(super) const META_PREFIX: &str = "x-amz-meta-";
 
     /* test_bn.py writes str(os.urandom(n)), a Python repr about four
      * times n long;  n random bytes is the intent */
-    fn random_content(n: usize) -> Vec<u8> {
+    pub(super) fn random_content(n: usize) -> Vec<u8> {
         let mut v = vec![0u8; n];
         rand::thread_rng().fill_bytes(&mut v);
         v
     }
 
-    fn md5_hex(b: &[u8]) -> String {
+    pub(super) fn md5_hex(b: &[u8]) -> String {
         hex::encode(Md5::digest(b))
     }
 
-    /* a topic pushing to `receiver`, and a notification on `bucket` for
-     * `events`, empty meaning every event (PSTopicS3, PSNotificationS3) */
-    async fn topic_and_notification(
+    /* a topic pushing to `endpoint`, and a notification on `bucket` for
+     * `events`, empty meaning every event (PSTopicS3, PSNotificationS3).
+     * The topic is `<bucket>_topic<suffix>` and the notification
+     * `<bucket>_notif<suffix>`, as test_bn.py names them */
+    pub(super) async fn topic_and_notification(
         sns: &aws_sdk_sns::Client,
         s3: &aws_sdk_s3::Client,
         bucket: &str,
-        receiver: &HttpReceiver,
+        suffix: &str,
+        endpoint: &str,
         attributes: &[(&str, &str)],
         events: Vec<aws_sdk_s3::types::Event>,
     ) -> String {
-        let mut req = sns.create_topic().name(format!("{bucket}_topic"))
-            .attributes("push-endpoint", receiver.endpoint());
+        let mut req = sns.create_topic().name(format!("{bucket}_topic{suffix}"))
+            .attributes("push-endpoint", endpoint);
         for (k, v) in attributes {
             req = req.attributes(*k, *v);
         }
@@ -2236,7 +2571,7 @@ mod http_tests {
                 NotificationConfiguration::builder()
                     .topic_configurations(
                         TopicConfiguration::builder()
-                            .id(format!("{bucket}_notif"))
+                            .id(format!("{bucket}_notif{suffix}"))
                             .topic_arn(&topic_arn)
                             .set_events(Some(events))
                             .build()
@@ -2250,7 +2585,7 @@ mod http_tests {
 
     /* the bucket's objects as test_bn.py's bucket.list() gives them:
      * name and ETag, unquoted */
-    async fn list_keys(s3: &aws_sdk_s3::Client, bucket: &str) -> Vec<(String, String)> {
+    pub(super) async fn list_keys(s3: &aws_sdk_s3::Client, bucket: &str) -> Vec<(String, String)> {
         let resp = s3.list_objects_v2().bucket(bucket).send().await.unwrap();
         resp.contents().iter()
             .map(|o| (o.key().unwrap().to_string(),
@@ -2258,12 +2593,24 @@ mod http_tests {
             .collect()
     }
 
-    /* verify_s3_records_by_elements, for a list of POSTs:  for each key,
-     * a record of the right kind, with an eTag, metadata keys under the
-     * prefix and, given sizes, the object's size;  given etags, the
-     * listed ETag is among them;  and, exact, no superfluous record */
-    fn verify_records(
-        received: &[Received],
+    /* what verify_s3_records_by_elements asserts of every record it
+     * reads:  an eTag, and metadata keys under the prefix */
+    pub(super) fn check_record(record: &serde_json::Value) {
+        let object = &record["s3"]["object"];
+        assert!(object.get("eTag").is_some(), "a record without an eTag: {record}");
+        for meta in object["metadata"].as_array().into_iter().flatten() {
+            assert!(meta["key"].as_str().unwrap_or_default().starts_with(META_PREFIX),
+                    "metadata outside {META_PREFIX}: {meta}");
+        }
+    }
+
+    /* verify_s3_records_by_elements, for a list of events, each a
+     * `Records` list (an HTTP POST's body, a Kafka message):  for each
+     * key, a record of the right kind, checked by check_record() and,
+     * given sizes, of the object's size;  every record has an eTag;  given etags, the listed ETag
+     * is among them;  and, exact, no superfluous event */
+    pub(super) fn verify_records(
+        events: &[serde_json::Value],
         bucket: &str,
         keys: &[(String, String)],
         exact_match: bool,
@@ -2273,8 +2620,8 @@ mod http_tests {
     ) {
         for (name, etag) in keys {
             let mut found: Option<u64> = None;
-            'posts: for post in received {
-                for record in post.body["Records"].as_array().expect("a Records list") {
+            'events: for event in events {
+                for record in event["Records"].as_array().expect("a Records list") {
                     let object = &record["s3"]["object"];
                     assert!(object.get("eTag").is_some(), "a record without an eTag: {record}");
                     if record["s3"]["bucket"]["name"] != bucket || object["key"] != name.as_str() {
@@ -2283,34 +2630,64 @@ mod http_tests {
                     if let Some(etags) = etags {
                         assert!(etags.contains(etag), "{name}'s ETag {etag} is not its content's MD5");
                     }
-                    for meta in object["metadata"].as_array().into_iter().flatten() {
-                        assert!(meta["key"].as_str().unwrap_or_default().starts_with(META_PREFIX),
-                                "metadata outside {META_PREFIX}: {meta}");
-                    }
+                    check_record(record);
                     let event = record["eventName"].as_str().unwrap_or_default();
                     let kind = if deletions { "ObjectRemoved" } else { "ObjectCreated" };
                     if event.starts_with(kind) {
                         found = Some(object["size"].as_u64().unwrap_or(0));
-                        break 'posts;
+                        break 'events;
                     }
                 }
             }
             let size = found.unwrap_or_else(|| panic!(
-                "no {} event found for key: {name};  {} POSTs, the first:  {}",
-                if deletions { "deletion" } else { "creation" }, received.len(),
-                received.first().map_or("none".into(), |p| p.body.to_string())));
+                "no {} event found for key: {name};  {} events, the first:  {}",
+                if deletions { "deletion" } else { "creation" }, events.len(),
+                events.first().map_or("none".into(), |e| e.to_string())));
             if let Some(sizes) = expected_sizes {
                 assert_eq!(Some(&size), sizes.get(name), "{name}'s size in its event");
             }
         }
         if exact_match {
-            assert_eq!(received.len(), keys.len(), "superfluous records are found");
+            assert_eq!(events.len(), keys.len(), "superfluous records are found");
         }
     }
 
-    async fn wait_for_the_messages() {
+    pub(super) async fn wait_for_the_messages() {
         /* test_bn.py:  "wait for 5sec for the messages" */
         tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+
+    /* PSNotificationS3.del_config():  an empty configuration */
+    pub(super) async fn remove_notifications(s3: &aws_sdk_s3::Client, bucket: &str) {
+        s3.put_bucket_notification_configuration().bucket(bucket)
+            .notification_configuration(NotificationConfiguration::builder().build())
+            .send().await.unwrap();
+    }
+}
+
+/* The HTTP subset of test_bn.py, against an endpoint in the test process
+ * (s3_tests_rs::notify_receiver).  The five tests whose topics are not
+ * persistent;  test_lifecycle_http, test_lifecycle_abort_mpu and
+ * test_metadata_filter_http make theirs persistent and wait on the
+ * queue, so they go with persistent delivery (work plan, Future work 6).
+ * Each keeps test_bn.py's name. */
+mod http_tests {
+    use std::collections::HashMap;
+
+    use aws_sdk_s3::primitives::ByteStream;
+    use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+    use rand::Rng;
+
+    use s3_tests_rs::client::{get_iam_root_s3client, get_sns_root_client};
+    use s3_tests_rs::fixtures::get_new_bucket_name;
+    use s3_tests_rs::notify_receiver::{HttpReceiver, Received};
+
+    use super::bn::{list_keys, md5_hex, random_content, remove_notifications,
+                    topic_and_notification, verify_records, wait_for_the_messages};
+
+    /* the POSTs' bodies, for the verifier */
+    fn bodies(received: &[Received]) -> Vec<serde_json::Value> {
+        received.iter().map(|r| r.body.clone()).collect()
     }
 
     /* notification('http', conn, cloudevents=...) */
@@ -2322,7 +2699,7 @@ mod http_tests {
         s3.create_bucket().bucket(&bucket).send().await.unwrap();
         let receiver = HttpReceiver::start().await;
         let attrs: &[(&str, &str)] = if cloudevents { &[("cloudevents", "true")] } else { &[] };
-        let topic_arn = topic_and_notification(&sns, &s3, &bucket, &receiver, attrs, vec![]).await;
+        let topic_arn = topic_and_notification(&sns, &s3, &bucket, "", &receiver.endpoint(), attrs, vec![]).await;
 
         let number_of_objects = if cloudevents { 10 } else { 100 };
         let mut etags = Vec::new();
@@ -2349,7 +2726,7 @@ mod http_tests {
         if cloudevents {
             check_cloudevents(&received);
         }
-        verify_records(&received, &bucket, &keys, true, false, Some(&sizes),
+        verify_records(&bodies(&received), &bucket, &keys, true, false, Some(&sizes),
                        md5.then_some(etags.as_slice()));
 
         let mut deletes = Vec::new();
@@ -2367,7 +2744,7 @@ mod http_tests {
         if cloudevents {
             check_cloudevents(&received);
         }
-        verify_records(&received, &bucket, &keys, true, true, Some(&sizes),
+        verify_records(&bodies(&received), &bucket, &keys, true, true, Some(&sizes),
                        md5.then_some(etags.as_slice()));
 
         remove_notifications(&s3, &bucket).await;
@@ -2406,13 +2783,6 @@ mod http_tests {
         }
     }
 
-    /* PSNotificationS3.del_config():  an empty configuration */
-    async fn remove_notifications(s3: &aws_sdk_s3::Client, bucket: &str) {
-        s3.put_bucket_notification_configuration().bucket(bucket)
-            .notification_configuration(NotificationConfiguration::builder().build())
-            .send().await.unwrap();
-    }
-
     #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
     #[tokio::test]
     async fn test_notification_http() {
@@ -2435,7 +2805,7 @@ mod http_tests {
         s3.create_bucket().bucket(&bucket).send().await.unwrap();
         let receiver = HttpReceiver::start().await;
         let opaque_data = "http://1.2.3.4:8888";
-        let topic_arn = topic_and_notification(&sns, &s3, &bucket, &receiver,
+        let topic_arn = topic_and_notification(&sns, &s3, &bucket, "", &receiver.endpoint(),
                                                &[("OpaqueData", opaque_data)], vec![]).await;
 
         let mut puts = Vec::new();
@@ -2472,7 +2842,7 @@ mod http_tests {
         let bucket = get_new_bucket_name();
         s3.create_bucket().bucket(&bucket).send().await.unwrap();
         let receiver = HttpReceiver::start().await;
-        let topic_arn = topic_and_notification(&sns, &s3, &bucket, &receiver, &[],
+        let topic_arn = topic_and_notification(&sns, &s3, &bucket, "", &receiver.endpoint(), &[],
             vec![aws_sdk_s3::types::Event::S3ObjectRemoved]).await;
 
         let mut sizes = HashMap::new();
@@ -2500,7 +2870,7 @@ mod http_tests {
             .send().await.unwrap();
         wait_for_the_messages().await;
 
-        verify_records(&receiver.take(), &bucket, &keys, true, true, Some(&sizes), None);
+        verify_records(&bodies(&receiver.take()), &bucket, &keys, true, true, Some(&sizes), None);
 
         sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
         remove_notifications(&s3, &bucket).await;
@@ -2518,14 +2888,14 @@ mod http_tests {
         let bucket = get_new_bucket_name();
         s3.create_bucket().bucket(&bucket).send().await.unwrap();
         let receiver = HttpReceiver::start().await;
-        let topic_arn = topic_and_notification(&sns, &s3, &bucket, &receiver, &[], vec![]).await;
+        let topic_arn = topic_and_notification(&sns, &s3, &bucket, "", &receiver.endpoint(), &[], vec![]).await;
 
         s3.put_object().bucket(&bucket).key("obj")
             .body(ByteStream::from(random_content(20 * 1024 * 1024))).send().await.unwrap();
         wait_for_the_messages().await;
 
         let keys = list_keys(&s3, &bucket).await;
-        verify_records(&receiver.take(), &bucket, &keys, true, false, None, None);
+        verify_records(&bodies(&receiver.take()), &bucket, &keys, true, false, None, None);
 
         remove_notifications(&s3, &bucket).await;
         sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();

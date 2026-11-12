@@ -1,6 +1,7 @@
 # s3-tests-rs — status
 
-Counted 2026-10-28.  Every number here is counted from the tree, and
+Counted 2026-10-28;  `test_sns` and `test_bn.py` recounted 2026-11-12.
+Every number here is counted from the tree, and
 the counting is mechanical enough to redo:  Rust tests by the `#[test]`
 and `#[tokio::test]` attributes, Python tests by `^def test_`, and the
 correspondence between them by set intersection of the names.
@@ -14,7 +15,7 @@ Four kinds of work, six modules.
 | `test_s3` | 751 | `test_s3.py`, `test_headers.py`, `rgw_multi/tests.py` |
 | `test_iam` | 75 | `test_iam.py`, `test_sts.py`, plus new account coverage |
 | `test_rgw` | 81 | original, except `quota.rs` from `s3_user_quota.pl` |
-| `test_sns` | 48 | `test_sns.py`;  the HTTP subset of `test_bn.py`;  Kafka scenarios derived from it;  original event-record, HTTPS and topic-configuration tests |
+| `test_sns` | 54 | `test_sns.py`;  the HTTP subset of `test_bn.py`, and its Kafka tests whose topics are not persistent;  Kafka scenarios of our own;  original event-record, HTTPS and topic-configuration tests |
 | `test_bench` | 7 | original — `elbencho` workload automation |
 | `test_corpus` | 12 | original — the conversion corpus |
 | **total** | **974** | |
@@ -44,19 +45,21 @@ makes the correspondence greppable rather than remembered:
 | `test_sts.py` | 34 | 1 | 33 |
 | `test_s3select.py` | 34 | 0 | 34 |
 | `test_sns.py` | 5 | 4 | 1 |
-| `test_bn.py` | 87 | 5 | 82 |
+| `test_bn.py` | 87 | 10 | 77 |
 | `test_s3control.py` | 1 | 0 | 1 |
 | `test_utils.py` | 1 | 0 | 1 |
-| **total** | **1059** | **743** | **316** |
+| **total** | **1059** | **748** | **311** |
 
-Two translations were renamed and so are not findable by name:
+`test_bn.py`'s Kafka tests whose topics are not persistent are
+translated and keep their names (2026-11-12), as its HTTP tests in
+`http_tests` do;  its SSL and SASL tests wait on a broker
+`kafka-vstart.sh` can configure.  `test_sns.rs`'s other
+`test_notification_kafka_*` are scenarios of our own, not
+translations;  their events pass `test_bn.py`'s per-record checks.
+AMQP, persistent topics and multisite are deliberately not ported.
 
-- `test_sns.rs`'s `test_notification_kafka_*` are scenarios derived
-  from `test_bn.py`'s 87 tests, not translations of its Kafka tests,
-  and check less than their source:  retranslating the non-persistent
-  Kafka tests under their own names is open (the nsfs work plan, I10).
-  Its HTTP tests, in `http_tests`, are translated and keep their names.
-  AMQP, persistent topics and multisite are deliberately not ported.
+One translation was renamed and so is not findable by name:
+
 - `test_rgw/quota.rs` follows `s3_user_quota.pl`, user scope only.  The
   companion `s3_bucket_quota.pl` — bucket-scope quota, the zero and
   negative cases, enable and disable — is not ported.
@@ -108,7 +111,9 @@ then hides from its own listings.
 `has_kafka` is **not** a test gate — it is a build feature that pulls
 in `rdkafka`.  The Kafka tests use the broker `[kafka] broker` names,
 or else `127.0.0.1:9092`, where `rgw-vstart.sh --with-kafka` starts
-one;  `validate.rs`'s `kafka` cell runs them.  The HTTP notification
+one;  `validate.rs`'s `kafka` cell runs them, and then
+`test_notification_kafka_idle_behaviour` alone (`-P kafka-idle`), since
+any other Kafka test keeps the gateway's connection busy.  The HTTP notification
 tests need nothing:  each starts its own endpoint.
 
 ## Remaining from `test_s3.py`, by area

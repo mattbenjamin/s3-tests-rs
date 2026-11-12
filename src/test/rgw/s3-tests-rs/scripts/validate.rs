@@ -678,7 +678,15 @@ fn plan(o: &Opts, suite_dir: &Path, run_dir: &Path, work_dir: &Path) -> Vec<Step
                     Suite::Kafka => {
                         let mut st = step(&cell, "kafka", suite_dir, s(&["cargo", "nextest", "run",
                             "--no-fail-fast", "--features", &format!("{FEATURES},has_kafka"),
-                            "-E", "binary(test_sns)"]));
+                            "-E", "binary(test_sns) & !test(=kafka_tests::test_notification_kafka_idle_behaviour)"]));
+                        st.env.push(("S3TEST_CONF".into(), conf.to_string_lossy().into()));
+                        st.parallel_log = true;
+                        steps.push(st);
+                        /* the idle test, alone:  any other Kafka test keeps
+                         * the gateway's connection busy */
+                        let mut st = step(&cell, "kafka-idle", suite_dir, s(&["cargo", "nextest", "run",
+                            "-P", "kafka-idle", "--no-fail-fast", "--features",
+                            &format!("{FEATURES},has_kafka")]));
                         st.env.push(("S3TEST_CONF".into(), conf.to_string_lossy().into()));
                         st.parallel_log = true;
                         steps.push(st);

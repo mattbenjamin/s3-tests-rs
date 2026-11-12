@@ -70,7 +70,7 @@ of the two overrides, make 24 deployments;  four more follow the table:
 |---|---|---|
 | `conversion-automatic` | the stand-up, restarted in `automatic` after `import` | the adoption corpus, adopted by `automatic`'s queue |
 | `conversion-promotion` | the stand-up, switched to `automatic` by the `adoption` hint | the adoption corpus, and the promotion checks |
-| `kafka` | not impersonated, `--with-kafka` | `test_sns` built with `has_kafka`, against the broker it starts;  needs podman |
+| `kafka` | not impersonated, `--with-kafka` | `test_sns` built with `has_kafka`, against the broker it starts, then `test_notification_kafka_idle_behaviour` alone (`kafka-idle`), since any other Kafka test keeps the gateway's connection busy;  needs podman |
 | `conversion-kafka` | the stand-up, with `kafka-vstart.sh`'s broker | the adoption corpus, and the `notify` steps' Kafka half;  needs podman |
 | `keycloak-s3-native` | impersonated, `s3-native`, `--with-keycloak` | profiles `sts` and `role-identity` built with `has_keycloak`:  the web identity tests against the IdP it starts, which is stopped after;  needs podman |
 | `keycloak-posix-strict` | impersonated, `posix-strict`, `--with-keycloak` | the same |

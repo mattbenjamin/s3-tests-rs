@@ -176,6 +176,13 @@ test-threads = 1
 default-filter = 'test(listing_intervals::)'
 test-threads = 1
 
+# The Kafka idle test, alone:  it waits for the gateway's connection to
+# the broker to go idle, which any other Kafka test keeps busy.  After
+# the Kafka tests, against the same gateway and broker.
+[profile.kafka-idle]
+default-filter = 'test(=kafka_tests::test_notification_kafka_idle_behaviour)'
+test-threads = 1
+
 # The membership test alone, run by validate.rs again after
 # `gpasswd -d rgwalice rgwfix`.
 [profile.dynamic-groups-membership]
@@ -207,7 +214,7 @@ threads-required = "num-test-threads"
 
 # The other daemon-wide switches, by hint, as the access model is
 [[profile.all.overrides]]
-filter = 'test(dynamic_groups::) | test(role_identity::) | test(listing_intervals::)'
+filter = 'test(dynamic_groups::) | test(role_identity::) | test(listing_intervals::) | test(=kafka_tests::test_notification_kafka_idle_behaviour)'
 threads-required = "num-test-threads"
 
 # Bench profiles — elbencho workloads, run with --run-ignored=all
