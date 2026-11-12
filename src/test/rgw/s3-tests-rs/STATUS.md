@@ -15,7 +15,7 @@ Four kinds of work, six modules.
 | `test_s3` | 751 | `test_s3.py`, `test_headers.py`, `rgw_multi/tests.py` |
 | `test_iam` | 75 | `test_iam.py`, `test_sts.py`, plus new account coverage |
 | `test_rgw` | 81 | original, except `quota.rs` from `s3_user_quota.pl` |
-| `test_sns` | 54 | `test_sns.py`;  the HTTP subset of `test_bn.py`, and its Kafka tests whose topics are not persistent;  Kafka scenarios of our own;  original event-record, HTTPS and topic-configuration tests |
+| `test_sns` | 64 | `test_sns.py`;  the HTTP subset of `test_bn.py`, and its Kafka tests whose topics are not persistent;  Kafka scenarios of our own;  original event-record, HTTPS and topic-configuration tests |
 | `test_bench` | 7 | original — `elbencho` workload automation |
 | `test_corpus` | 12 | original — the conversion corpus |
 | **total** | **974** | |
