@@ -21,6 +21,9 @@ struct ElbenchoOpts {
      * it writes, whatever the order of the options, so the listing is a
      * step of its own. */
     listed: bool,
+    /* prepended to every object name (`--s3objprefix`), which puts the
+     * objects that many directories deeper */
+    obj_prefix: Option<String>,
 }
 
 impl ElbenchoOpts {
@@ -38,6 +41,7 @@ impl ElbenchoOpts {
             bucket: "benchsmall1",
             phases: &["-w", "-r", "-F", "-D"],
             listed: false,
+            obj_prefix: None,
         }
     }
 
@@ -55,6 +59,7 @@ impl ElbenchoOpts {
             bucket: "benchlarge1",
             phases: &["-w", "-r", "-F", "-D"],
             listed: false,
+            obj_prefix: None,
         }
     }
 
@@ -72,6 +77,7 @@ impl ElbenchoOpts {
             bucket: "benchsmallsoak1",
             phases: &["-w"],
             listed: false,
+            obj_prefix: None,
         }
     }
 
@@ -89,6 +95,7 @@ impl ElbenchoOpts {
             bucket: "benchsoak1",
             phases: &["-w"],
             listed: false,
+            obj_prefix: None,
         }
     }
 
@@ -106,6 +113,7 @@ impl ElbenchoOpts {
             bucket: "benchmixed1",
             phases: &["-w", "-r", "-F", "-D"],
             listed: false,
+            obj_prefix: None,
         }
     }
 }
@@ -165,8 +173,11 @@ fn run_elbencho(opts: &ElbenchoOpts) {
        .arg("-N").arg(opts.num_files.to_string())
        .arg("-s").arg(&opts.file_size)
        .arg("-b").arg(&opts.block_size)
-       .arg("--mkdirs")
-       .arg(opts.bucket)
+       .arg("--mkdirs");
+    if let Some(prefix) = &opts.obj_prefix {
+        cmd.arg("--s3objprefix").arg(prefix);
+    }
+    cmd.arg(opts.bucket)
        .arg("--jsonfile").arg(&json_path)
        .arg("--livecsv").arg(format!("/tmp/elbencho-live-{}.csv", opts.label));
 
@@ -174,9 +185,9 @@ fn run_elbencho(opts: &ElbenchoOpts) {
         cmd.arg(arg);
     }
 
-    eprintln!("bench::{}: threads={} dirs={} files={} size={} phases={:?} listed={}",
+    eprintln!("bench::{}: threads={} dirs={} files={} size={} phases={:?} listed={} prefix={:?}",
         opts.label, opts.threads, opts.num_dirs,
-        opts.num_files, opts.file_size, opts.phases, opts.listed);
+        opts.num_files, opts.file_size, opts.phases, opts.listed, opts.obj_prefix);
 
     let output = cmd.output().expect("failed to execute elbencho");
     let code = output.status.code().unwrap_or(-1);
@@ -267,6 +278,40 @@ fn bench_smoke_mixed_sizes() {
             bucket: "benchmixed1",
             phases: &["-w", "-r", "-F", "-D"],
             listed: false,
+            obj_prefix: None,
+        });
+    }
+}
+
+/// Small objects at several key depths:  the same write, GET, HEAD and
+/// delete, with `--s3objprefix` adding that many directory components to
+/// every key (`BENCH_DEPTHS`, default 1,16,64).  A filesystem driver
+/// reaches an object's file through each directory on its key, so the
+/// read and stat phases measure what a key's depth costs.
+#[test]
+#[ignore = "bench: requires elbencho"]
+fn bench_smoke_deep_keys() {
+    require_elbencho(&get_config().bench.elbencho_bin);
+    let depths: Vec<u32> = env_or("BENCH_DEPTHS", "1,16,64").split(',')
+        .filter_map(|d| d.trim().parse().ok()).collect();
+    let threads = env_or("BENCH_THREADS", "8").parse().unwrap_or(8);
+    let num_files = env_or("BENCH_NUM_FILES", "200").parse().unwrap_or(200);
+    for depth in depths {
+        let prefix: String = (1..=depth).map(|i| format!("k{i}/")).collect();
+        // leak to get 'static, as the mixed-size tiers do
+        let label: &'static str = Box::leak(format!("smoke_deep_{depth}").into_boxed_str());
+        let bucket: &'static str = Box::leak(format!("benchdeep{depth}").into_boxed_str());
+        run_elbencho(&ElbenchoOpts {
+            label,
+            threads,
+            num_dirs: 1,
+            num_files,
+            file_size: "4k".to_string(),
+            block_size: "4k".to_string(),
+            bucket,
+            phases: &["-w", "-r", "--stat", "-F", "-D"],
+            listed: false,
+            obj_prefix: Some(prefix),
         });
     }
 }
