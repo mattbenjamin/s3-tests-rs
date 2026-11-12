@@ -571,6 +571,49 @@ mod kafka_tests {
         s3.delete_bucket().bucket(&bucket).send().await.unwrap();
     }
 
+    /* I10 item 6.  A Kafka broker that is down holds a PUT whose topic
+     * asks for the broker's ack until rgw_kafka_message_timeout (default
+     * 5000 ms);  then the event is lost and the PUT succeeds. */
+    #[tokio::test]
+    async fn test_notification_kafka_broker_down() {
+        use super::bn::*;
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let (sns, s3) = (get_sns_root_client(), get_iam_root_s3client());
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap()
+            .local_addr().unwrap().port();
+        let topic_arn = topic_and_notification(&sns, &s3, &bucket, "",
+            &format!("kafka://127.0.0.1:{port}"), &[("kafka-ack-level", "broker")],
+            vec![aws_sdk_s3::types::Event::S3ObjectCreated]).await;
+        let start = std::time::Instant::now();
+        let put = s3.put_object().bucket(&bucket).key("k")
+            .body(ByteStream::from_static(b"k")).send().await;
+        let elapsed = start.elapsed();
+        eprintln!("PUT with the broker down:  {elapsed:?}");
+        assert!(put.is_ok(), "a PUT failed because its broker was down:  {put:?}");
+        assert!(elapsed < Duration::from_secs(10),
+                "a PUT whose broker was down took {elapsed:?}, past \
+                 rgw_kafka_message_timeout's default and a margin");
+        s3.delete_object().bucket(&bucket).key("k").send().await.unwrap();
+        remove_notifications(&s3, &bucket).await;
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
+    /* I10 item 4, the Kafka endpoint */
+    #[tokio::test]
+    async fn test_notification_record_values_kafka() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let bucket = get_new_bucket_name();
+        let broker = get_kafka_broker();
+        let receiver = KafkaReceiver::start(&format!("{bucket}_topic"), &broker).await;
+        receiver.verify().await;
+        super::bn::record_values(&bucket, &format!("kafka://{broker}"),
+                                 &[("kafka-ack-level", "broker")],
+                                 || receiver.take()).await;
+    }
+
     /* the gateway's open Kafka connections, through the kafka-idle hint;
      * with `seconds`, rgw_kafka_connection_idle is set first.  None where
      * the gateway serves no such hint */
@@ -2663,6 +2706,133 @@ mod bn {
             .notification_configuration(NotificationConfiguration::builder().build())
             .send().await.unwrap();
     }
+
+    /* every record in `events`, each a Records list */
+    pub(super) fn records_of(events: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        events.iter()
+            .flat_map(|e| e["Records"].as_array().cloned().unwrap_or_default())
+            .collect()
+    }
+
+    /* the time a record's sequencer encodes:  the hex of a utime_t's
+     * bytes, its seconds and nanoseconds as native 32-bit integers, as
+     * rgw_pubsub.cc's populate_event() writes it */
+    pub(super) fn sequencer_time(seq: &str) -> Option<std::time::SystemTime> {
+        let bytes = hex::decode(seq).ok()?;
+        if bytes.len() != 8 {
+            return None;
+        }
+        let sec = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+        let nsec = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+        Some(std::time::UNIX_EPOCH + Duration::new(sec as u64, nsec))
+    }
+
+    /* `{key, val}` pairs, as a record lists metadata and tags */
+    fn pairs(v: &serde_json::Value) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = v.as_array().into_iter().flatten()
+            .map(|p| (p["key"].as_str().unwrap_or_default().to_string(),
+                      p["val"].as_str().unwrap_or_default().to_string()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /* The record's values against RGW's reference:  rgw_pubsub.cc's record
+     * as the rados driver's populate_event() fills it, which nsfs's
+     * FSNotification fills field for field.  A versioned key written
+     * twice, the first time with metadata and tags, each record held
+     * against the object as S3 reports that version:  eTag and size;
+     * eventTime the object's mtime, so Last-Modified to the second;
+     * metadata and tags their values;  the sequencer a time inside the
+     * request, the second write's not before the first's;  awsRegion
+     * the zonegroup, and the region the bucket ARN names where it names
+     * one.  `bucket` is created here, and its topic is
+     * `<bucket>_topic`, so a receiver can be started on it first. */
+    pub(super) async fn record_values<F>(bucket: &str, endpoint: &str,
+                                         attributes: &[(&str, &str)], take: F)
+    where
+        F: Fn() -> Vec<serde_json::Value>,
+    {
+        use aws_sdk_s3::primitives::ByteStream;
+        use aws_sdk_s3::types::{BucketVersioningStatus, VersioningConfiguration};
+        use s3_tests_rs::client::{get_iam_root_s3client, get_sns_root_client};
+
+        let sns = get_sns_root_client();
+        let s3 = get_iam_root_s3client();
+        s3.create_bucket().bucket(bucket).send().await.unwrap();
+        s3.put_bucket_versioning().bucket(bucket)
+            .versioning_configuration(VersioningConfiguration::builder()
+                .status(BucketVersioningStatus::Enabled).build())
+            .send().await.unwrap();
+        let topic_arn = topic_and_notification(&sns, &s3, bucket, "", endpoint, attributes,
+            vec![aws_sdk_s3::types::Event::S3ObjectCreated]).await;
+
+        /* the gateway's clock is this host's in every configuration the
+         * suite runs, but a second either side is allowed */
+        let before = std::time::SystemTime::now() - Duration::from_secs(1);
+        let first = s3.put_object().bucket(bucket).key("k")
+            .metadata("color", "blue").tagging("a=1&b=2")
+            .body(ByteStream::from_static(b"first")).send().await.unwrap();
+        let second = s3.put_object().bucket(bucket).key("k")
+            .body(ByteStream::from_static(b"second!")).send().await.unwrap();
+        let after = std::time::SystemTime::now() + Duration::from_secs(1);
+        wait_for_the_messages().await;
+
+        let records = records_of(&take());
+        assert_eq!(records.len(), 2, "two writes, two records:  {records:?}");
+        let mut times = Vec::new();
+        for (put, size, meta, tags) in [
+            (&first, 5u64, vec![("x-amz-meta-color", "blue")], vec![("a", "1"), ("b", "2")]),
+            (&second, 7u64, vec![], vec![]),
+        ] {
+            let vid = put.version_id().expect("a versioned PUT returned no version id");
+            let r = records.iter()
+                .find(|r| r["s3"]["object"]["versionId"] == vid)
+                .unwrap_or_else(|| panic!("no record names version {vid}:  {records:?}"));
+            let head = s3.head_object().bucket(bucket).key("k").version_id(vid)
+                .send().await.unwrap();
+            let object = &r["s3"]["object"];
+            assert_eq!(object["eTag"], head.e_tag().unwrap_or_default().trim_matches('"'),
+                       "eTag of version {vid}");
+            assert_eq!(object["size"].as_u64(), Some(size), "size of version {vid}");
+            let lm = head.last_modified().expect("no Last-Modified").secs();
+            let et = chrono::DateTime::parse_from_rfc3339(r["eventTime"].as_str().unwrap_or_default())
+                .unwrap_or_else(|e| panic!("eventTime is not a time ({e}):  {r}"));
+            assert_eq!(et.timestamp(), lm,
+                       "eventTime {} is not version {vid}'s Last-Modified", r["eventTime"]);
+            let want_meta: Vec<(String, String)> = meta.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            let got_meta: Vec<(String, String)> = pairs(&object["metadata"]).into_iter()
+                .filter(|(k, _)| k.starts_with(META_PREFIX)).collect();
+            assert_eq!(got_meta, want_meta, "metadata of version {vid}");
+            let want_tags: Vec<(String, String)> = tags.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            assert_eq!(pairs(&object["tags"]), want_tags, "tags of version {vid}");
+            let seq = object["sequencer"].as_str().unwrap_or_default();
+            let t = sequencer_time(seq)
+                .unwrap_or_else(|| panic!("sequencer {seq:?} does not decode to a time"));
+            assert!(t >= before && t <= after,
+                    "sequencer {seq} is not a time inside the request");
+            times.push(t);
+            let region = r["awsRegion"].as_str().unwrap_or_default();
+            assert!(!region.is_empty(), "no awsRegion:  {r}");
+            let arn = r["s3"]["bucket"]["arn"].as_str().unwrap_or_default();
+            assert!(arn == format!("arn:aws:s3:::{bucket}")
+                    || arn == format!("arn:aws:s3:{region}::{bucket}"),
+                    "bucket ARN {arn:?} names neither no region nor awsRegion {region:?}");
+        }
+        assert!(times[0] <= times[1],
+                "the second write's sequencer is before the first's");
+
+        let versions = s3.list_object_versions().bucket(bucket).send().await.unwrap();
+        for v in versions.versions() {
+            s3.delete_object().bucket(bucket).key(v.key().unwrap())
+                .version_id(v.version_id().unwrap()).send().await.unwrap();
+        }
+        remove_notifications(&s3, bucket).await;
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(bucket).send().await.unwrap();
+    }
 }
 
 /* The HTTP subset of test_bn.py, against an endpoint in the test process
@@ -2944,6 +3114,350 @@ mod http_event_types {
 
     async fn settle() {
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    /* a versioned bucket, notifying `receiver` of `events` */
+    async fn versioned_notify_on(sns: &aws_sdk_sns::Client, s3: &aws_sdk_s3::Client,
+                                 bucket: &str, receiver: &HttpReceiver,
+                                 status: aws_sdk_s3::types::BucketVersioningStatus,
+                                 events: Vec<Event>) -> String {
+        s3.create_bucket().bucket(bucket).send().await.unwrap();
+        s3.put_bucket_versioning().bucket(bucket)
+            .versioning_configuration(aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(status).build())
+            .send().await.unwrap();
+        notify_on(sns, s3, bucket, receiver, events).await
+    }
+
+    /* every version and delete marker, then the bucket and its topic */
+    async fn remove_versioned(sns: &aws_sdk_sns::Client, s3: &aws_sdk_s3::Client,
+                              bucket: &str, topic_arn: &str) {
+        let listed = s3.list_object_versions().bucket(bucket).send().await.unwrap();
+        for (key, vid) in listed.versions().iter()
+            .map(|v| (v.key().unwrap_or_default(), v.version_id().unwrap_or("null")))
+            .chain(listed.delete_markers().iter()
+                   .map(|m| (m.key().unwrap_or_default(), m.version_id().unwrap_or("null"))))
+        {
+            s3.delete_object().bucket(bucket).key(key).version_id(vid).send().await.unwrap();
+        }
+        sns.delete_topic().topic_arn(topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(bucket).send().await.unwrap();
+    }
+
+    /* I10 item 5.  A delete that creates a delete marker sends
+     * ObjectRemoved:DeleteMarkerCreated, naming the marker's version;  a
+     * creation, and the permanent delete of that marker, send no such
+     * event. */
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_delete_marker_created_http() {
+        use aws_sdk_s3::types::BucketVersioningStatus;
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let (sns, s3) = (get_sns_root_client(), get_iam_root_s3client());
+        let bucket = get_new_bucket_name();
+        let receiver = HttpReceiver::start().await;
+        let topic_arn = versioned_notify_on(&sns, &s3, &bucket, &receiver,
+            BucketVersioningStatus::Enabled,
+            vec![Event::S3ObjectRemovedDeleteMarkerCreated]).await;
+
+        s3.put_object().bucket(&bucket).key("k")
+            .body(ByteStream::from_static(b"k")).send().await.unwrap();
+        settle().await;
+        assert!(receiver.take().is_empty(), "a creation sent a DeleteMarkerCreated event");
+
+        let del = s3.delete_object().bucket(&bucket).key("k").send().await.unwrap();
+        assert_eq!(del.delete_marker(), Some(true), "the delete made no delete marker");
+        let marker = del.version_id().expect("the delete marker has no version id").to_string();
+        settle().await;
+        let got = records(&receiver.take());
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0]["eventName"], "ObjectRemoved:DeleteMarkerCreated");
+        assert_eq!(got[0]["s3"]["object"]["key"], "k");
+        assert_eq!(got[0]["s3"]["object"]["versionId"], marker.as_str());
+
+        s3.delete_object().bucket(&bucket).key("k").version_id(&marker)
+            .send().await.unwrap();
+        settle().await;
+        assert!(receiver.take().is_empty(),
+                "removing the delete marker sent a DeleteMarkerCreated event");
+
+        remove_versioned(&sns, &s3, &bucket, &topic_arn).await;
+    }
+
+    /* I10 item 5.  In a versioning-suspended bucket a delete also makes a
+     * delete marker -- the null version -- and AWS sends
+     * ObjectRemoved:DeleteMarkerCreated for it as for any other. */
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_delete_marker_created_suspended_http() {
+        use aws_sdk_s3::types::BucketVersioningStatus;
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let (sns, s3) = (get_sns_root_client(), get_iam_root_s3client());
+        let bucket = get_new_bucket_name();
+        let receiver = HttpReceiver::start().await;
+        let topic_arn = versioned_notify_on(&sns, &s3, &bucket, &receiver,
+            BucketVersioningStatus::Suspended,
+            vec![Event::from("s3:ObjectRemoved:*")]).await;
+
+        s3.put_object().bucket(&bucket).key("k")
+            .body(ByteStream::from_static(b"k")).send().await.unwrap();
+        let del = s3.delete_object().bucket(&bucket).key("k").send().await.unwrap();
+        assert_eq!(del.delete_marker(), Some(true),
+                   "a suspended bucket's delete made no delete marker");
+        settle().await;
+        let got = records(&receiver.take());
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0]["eventName"], "ObjectRemoved:DeleteMarkerCreated",
+                   "a suspended bucket's delete made a delete marker and was reported as {}",
+                   got[0]["eventName"]);
+
+        remove_versioned(&sns, &s3, &bucket, &topic_arn).await;
+    }
+
+    /* I10 item 5.  An upload by POST sends ObjectCreated:Post, with the
+     * object's key, size and ETag;  a PUT sends none to a POST-only
+     * configuration.  The form is signed with the account's own key, so
+     * the bucket, topic and upload are one account's. */
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_object_created_post_http() {
+        use s3_tests_rs::http::{encode_policy, get_endpoint_url, post_object_form, sign_policy};
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let (sns, s3) = (get_sns_root_client(), get_iam_root_s3client());
+        let cfg = s3_tests_rs::config::get_config();
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let receiver = HttpReceiver::start().await;
+        let topic_arn = notify_on(&sns, &s3, &bucket, &receiver,
+            vec![Event::S3ObjectCreatedPost]).await;
+
+        s3.put_object().bucket(&bucket).key("put")
+            .body(ByteStream::from_static(b"put")).send().await.unwrap();
+        settle().await;
+        assert!(receiver.take().is_empty(), "a PUT sent an event to a POST-only configuration");
+
+        let expiration = (chrono::Utc::now() + chrono::Duration::seconds(600))
+            .format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let policy = encode_policy(&serde_json::json!({
+            "expiration": expiration,
+            "conditions": [
+                {"bucket": bucket},
+                ["starts-with", "$key", "post"],
+                {"acl": "private"},
+                ["content-length-range", 0, 1024],
+            ],
+        }));
+        let fields = vec![
+            ("key", "post.txt".to_string()),
+            ("AWSAccessKeyId", cfg.iam_root_access_key.clone()),
+            ("acl", "private".to_string()),
+            ("signature", sign_policy(&cfg.iam_root_secret_key, policy.as_bytes())),
+            ("policy", policy),
+        ];
+        let r = post_object_form(&get_endpoint_url(&bucket), fields, b"bar").await;
+        assert_eq!(r.status, 204, "the POST upload failed:  {}", r.body);
+        settle().await;
+        let got = records(&receiver.take());
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0]["eventName"], "ObjectCreated:Post");
+        assert_eq!(got[0]["s3"]["object"]["key"], "post.txt");
+        assert_eq!(got[0]["s3"]["object"]["size"], 3);
+        let head = s3.head_object().bucket(&bucket).key("post.txt").send().await.unwrap();
+        assert_eq!(got[0]["s3"]["object"]["eTag"],
+                   head.e_tag().unwrap_or_default().trim_matches('"'));
+
+        for key in ["put", "post.txt"] {
+            s3.delete_object().bucket(&bucket).key(key).send().await.unwrap();
+        }
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
+    /* I10 item 5.  A copy sends ObjectCreated:Copy carrying the copy's
+     * metadata:  under the COPY directive the source's, and under
+     * REPLACE the request's;  and, under COPY, the source's tags.  A
+     * PUT sends none to a Copy-only configuration.  The tags of a
+     * REPLACE copy are the next test's. */
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_copy_attributes_http() {
+        use aws_sdk_s3::types::{MetadataDirective, TaggingDirective};
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let (sns, s3) = (get_sns_root_client(), get_iam_root_s3client());
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let receiver = HttpReceiver::start().await;
+        let topic_arn = notify_on(&sns, &s3, &bucket, &receiver,
+            vec![Event::S3ObjectCreatedCopy]).await;
+
+        s3.put_object().bucket(&bucket).key("src").metadata("color", "blue")
+            .tagging("a=1").body(ByteStream::from_static(b"source")).send().await.unwrap();
+        settle().await;
+        assert!(receiver.take().is_empty(), "a PUT sent an event to a Copy-only configuration");
+
+        let pairs = |v: &serde_json::Value| -> Vec<(String, String)> {
+            let mut out: Vec<(String, String)> = v.as_array().into_iter().flatten()
+                .map(|p| (p["key"].as_str().unwrap_or_default().to_string(),
+                          p["val"].as_str().unwrap_or_default().to_string()))
+                .filter(|(k, _)| !k.starts_with("x-amz-meta-") || k == "x-amz-meta-color")
+                .collect();
+            out.sort();
+            out
+        };
+        let source = format!("{bucket}/src");
+        s3.copy_object().bucket(&bucket).key("copied").copy_source(&source)
+            .send().await.unwrap();
+        s3.copy_object().bucket(&bucket).key("replaced").copy_source(&source)
+            .metadata_directive(MetadataDirective::Replace).metadata("color", "red")
+            .tagging_directive(TaggingDirective::Replace).tagging("b=2")
+            .send().await.unwrap();
+        settle().await;
+        let got = records(&receiver.take());
+        assert_eq!(got.len(), 2, "{got:?}");
+        for (key, color) in [("copied", "blue"), ("replaced", "red")] {
+            let r = got.iter().find(|r| r["s3"]["object"]["key"] == key)
+                .unwrap_or_else(|| panic!("no event for {key}:  {got:?}"));
+            assert_eq!(r["eventName"], "ObjectCreated:Copy");
+            assert_eq!(pairs(&r["s3"]["object"]["metadata"]),
+                       vec![("x-amz-meta-color".to_string(), color.to_string())],
+                       "metadata of {key}");
+            if key == "replaced" {
+                continue;
+            }
+            let mut held: Vec<(String, String)> = s3.get_object_tagging().bucket(&bucket)
+                .key(key).send().await.unwrap().tag_set().iter()
+                .map(|t| (t.key().to_string(), t.value().to_string())).collect();
+            held.sort();
+            assert_eq!(pairs(&r["s3"]["object"]["tags"]), held,
+                       "the event's tags of {key} are not the copy's");
+        }
+
+        for key in ["src", "copied", "replaced"] {
+            s3.delete_object().bucket(&bucket).key(key).send().await.unwrap();
+        }
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
+    /* I10 item 5.  A copy with TaggingDirective REPLACE sends the
+     * request's tags, which are the copy's.  The copy has them;  its
+     * event carries the source's, since this tree's CopyObject gives
+     * its notification no tags and FSNotification falls back to the
+     * source object's.  Upstream's e63f8d1aff0 ("rgw: honor CopyObject
+     * tagging-directive", PR #70051) passes them;  it arrives with the
+     * rebase onto main (s3-tests-rs work plan, U1). */
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[cfg_attr(feature = "fails_on_nsfs", ignore = "nsfs:  a REPLACE copy's event carries the source's tags until upstream e63f8d1aff0 is merged")]
+    #[cfg_attr(feature = "fails_on_posix", ignore = "posix:  a REPLACE copy's event carries the source's tags until upstream e63f8d1aff0 is merged")]
+    #[tokio::test]
+    async fn test_notification_copy_replaced_tags_http() {
+        use aws_sdk_s3::types::{MetadataDirective, TaggingDirective};
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let (sns, s3) = (get_sns_root_client(), get_iam_root_s3client());
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let receiver = HttpReceiver::start().await;
+        let topic_arn = notify_on(&sns, &s3, &bucket, &receiver,
+            vec![Event::S3ObjectCreatedCopy]).await;
+
+        s3.put_object().bucket(&bucket).key("src").tagging("a=1")
+            .body(ByteStream::from_static(b"source")).send().await.unwrap();
+        s3.copy_object().bucket(&bucket).key("replaced").copy_source(format!("{bucket}/src"))
+            .metadata_directive(MetadataDirective::Replace)
+            .tagging_directive(TaggingDirective::Replace).tagging("b=2")
+            .send().await.unwrap();
+        settle().await;
+        let got = records(&receiver.take());
+        assert_eq!(got.len(), 1, "{got:?}");
+        let tags: Vec<(String, String)> = got[0]["s3"]["object"]["tags"].as_array()
+            .into_iter().flatten()
+            .map(|p| (p["key"].as_str().unwrap_or_default().to_string(),
+                      p["val"].as_str().unwrap_or_default().to_string()))
+            .collect();
+        assert_eq!(tags, vec![("b".to_string(), "2".to_string())],
+                   "a REPLACE copy's event does not carry the copy's tags");
+
+        for key in ["src", "replaced"] {
+            s3.delete_object().bucket(&bucket).key(key).send().await.unwrap();
+        }
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+    }
+
+    /* a topic on `endpoint` and a creation notification, then one PUT
+     * timed;  the PUT must succeed whatever happens to delivery */
+    async fn timed_put_to(endpoint: &str, attributes: &[(&str, &str)]) -> Duration {
+        let (sns, s3) = (get_sns_root_client(), get_iam_root_s3client());
+        let bucket = get_new_bucket_name();
+        s3.create_bucket().bucket(&bucket).send().await.unwrap();
+        let topic_arn = super::bn::topic_and_notification(&sns, &s3, &bucket, "", endpoint,
+            attributes, vec![Event::S3ObjectCreated]).await;
+        let start = std::time::Instant::now();
+        let put = s3.put_object().bucket(&bucket).key("k")
+            .body(ByteStream::from_static(b"k")).send().await;
+        let elapsed = start.elapsed();
+        assert!(put.is_ok(), "a PUT failed because its notification could not be \
+                              delivered to {endpoint}:  {put:?}");
+        s3.delete_object().bucket(&bucket).key("k").send().await.unwrap();
+        super::bn::remove_notifications(&s3, &bucket).await;
+        sns.delete_topic().topic_arn(&topic_arn).send().await.unwrap();
+        s3.delete_bucket().bucket(&bucket).send().await.unwrap();
+        elapsed
+    }
+
+    /* I10 item 6.  An HTTP endpoint that is down -- nothing listens on
+     * its port -- costs the PUT nothing:  the connection is refused at
+     * once, the event is lost and logged, and the PUT succeeds.  Within
+     * rgw_http_notif_connection_timeout's default (5 s) whatever the
+     * cause. */
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_http_endpoint_down() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap()
+            .local_addr().unwrap().port();
+        let elapsed = timed_put_to(&format!("http://127.0.0.1:{port}"), &[]).await;
+        eprintln!("PUT with the endpoint down:  {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(5),
+                "a PUT whose endpoint was down took {elapsed:?}");
+    }
+
+    /* I10 item 6.  An HTTP endpoint that accepts and never answers holds
+     * the PUT:  delivery is synchronous, inside the request, until
+     * rgw_http_notif_message_timeout (default 10 s);  then the event is
+     * lost and the PUT succeeds.  NooBaa stages events and sends them
+     * later, so its PUT does not wait;  persistent delivery is the work
+     * plan's Future work 6. */
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_http_endpoint_slow() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let held = tokio::spawn(async move {
+            let mut conns = Vec::new();
+            while let Ok((c, _)) = listener.accept().await {
+                conns.push(c);
+            }
+        });
+        let elapsed = timed_put_to(&format!("http://127.0.0.1:{port}"), &[]).await;
+        held.abort();
+        eprintln!("PUT with the endpoint not answering:  {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(15),
+                "a PUT whose endpoint never answered took {elapsed:?}, past \
+                 rgw_http_notif_message_timeout's default and a margin");
+    }
+
+    /* I10 item 4, the HTTP endpoint */
+    #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
+    #[tokio::test]
+    async fn test_notification_record_values_http() {
+        let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+        let bucket = get_new_bucket_name();
+        let receiver = HttpReceiver::start().await;
+        super::bn::record_values(&bucket, &receiver.endpoint(), &[], || {
+            receiver.take().into_iter().map(|r| r.body).collect()
+        }).await;
     }
 
     #[cfg_attr(feature = "fails_on_aws", ignore = "fails on aws:  no push-endpoint")]
