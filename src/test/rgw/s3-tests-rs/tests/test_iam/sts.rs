@@ -187,6 +187,19 @@ async fn test_account_role_policy_allow() {
     iam.delete_role().role_name(&role_name).send().await.unwrap();
 }
 
+/* An identity policy allowing `user_name` to assume `role_arn`.  A role
+ * in another account takes this as well as the role's trust policy, as in
+ * AWS, where each account grants its own side (ceph PR #66909);  in the
+ * role's own account the trust policy alone suffices. */
+async fn allow_assume_role(iam: &aws_sdk_iam::Client, user_name: &str, role_arn: &str) {
+    let policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Action": "sts:AssumeRole", "Resource": role_arn}]
+    }).to_string();
+    iam.put_user_policy().user_name(user_name).policy_name("AllowAssumeRole")
+        .policy_document(policy).send().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_cross_account_assume_role() {
     let _guard = s3_tests_rs::fixtures::TestGuard::setup();
@@ -212,6 +225,8 @@ async fn test_cross_account_assume_role() {
     let role = iam_root.create_role().role_name(&role_name).path(path)
         .assume_role_policy_document(&trust_policy).send().await.unwrap();
     let role_arn = role.role().unwrap().arn().to_string();
+
+    allow_assume_role(&iam_alt, &user_name, &role_arn).await;
 
     /* alt user assumes main account role */
     let sts = build_sts_client(key.access_key_id(), key.secret_access_key());
@@ -246,6 +261,7 @@ async fn test_cross_account_assume_role() {
     roots3.delete_bucket().bucket(&bucket).send().await.unwrap();
     iam_root.delete_role_policy().role_name(&role_name).policy_name("AllowList").send().await.unwrap();
     iam_root.delete_role().role_name(&role_name).send().await.unwrap();
+    iam_alt.delete_user_policy().user_name(&user_name).policy_name("AllowAssumeRole").send().await.unwrap();
     iam_alt.delete_access_key().user_name(&user_name).access_key_id(key.access_key_id()).send().await.unwrap();
     iam_alt.delete_user().user_name(&user_name).send().await.unwrap();
 }
@@ -275,6 +291,8 @@ async fn test_cross_account_role_create_bucket() {
         .assume_role_policy_document(&trust_policy).send().await.unwrap();
     let role_arn = role.role().unwrap().arn().to_string();
 
+    allow_assume_role(&iam_alt, &user_name, &role_arn).await;
+
     let sts = build_sts_client(key.access_key_id(), key.secret_access_key());
     let assume = sts.assume_role().role_arn(&role_arn)
         .role_session_name("xacct-cb").send().await.unwrap();
@@ -303,6 +321,7 @@ async fn test_cross_account_role_create_bucket() {
     roots3.delete_bucket().bucket(&bucket_name).send().await.unwrap();
     iam_root.delete_role_policy().role_name(&role_name).policy_name("AllowCreate").send().await.unwrap();
     iam_root.delete_role().role_name(&role_name).send().await.unwrap();
+    iam_alt.delete_user_policy().user_name(&user_name).policy_name("AllowAssumeRole").send().await.unwrap();
     iam_alt.delete_access_key().user_name(&user_name).access_key_id(key.access_key_id()).send().await.unwrap();
     iam_alt.delete_user().user_name(&user_name).send().await.unwrap();
 }
@@ -331,6 +350,8 @@ async fn test_cross_account_role_get_role() {
         .assume_role_policy_document(&trust_policy).send().await.unwrap();
     let role_arn = role.role().unwrap().arn().to_string();
 
+    allow_assume_role(&iam_alt, &user_name, &role_arn).await;
+
     let sts = build_sts_client(key.access_key_id(), key.secret_access_key());
     let assume = sts.assume_role().role_arn(&role_arn)
         .role_session_name("xacct-gr").send().await.unwrap();
@@ -358,6 +379,7 @@ async fn test_cross_account_role_get_role() {
     /* clean up */
     iam_root.delete_role_policy().role_name(&role_name).policy_name("AllowGetRole").send().await.unwrap();
     iam_root.delete_role().role_name(&role_name).send().await.unwrap();
+    iam_alt.delete_user_policy().user_name(&user_name).policy_name("AllowAssumeRole").send().await.unwrap();
     iam_alt.delete_access_key().user_name(&user_name).access_key_id(key.access_key_id()).send().await.unwrap();
     iam_alt.delete_user().user_name(&user_name).send().await.unwrap();
 }
@@ -1047,4 +1069,131 @@ async fn test_assume_role_with_web_identity_role_resource_tag() {
     delete_test_bucket(&bucket).await;
     role.delete().await;
     put.expect("the bucket carries the tag the role policy requires, and the PutObject was refused");
+}
+
+/* test_sts.py's test_cross_account_user_policy_assume_role:  a role in the
+ * main account trusts a user in the alt account, and AssumeRole is refused
+ * until the user's own account allows it with an identity policy */
+#[tokio::test]
+async fn test_cross_account_user_policy_assume_role() {
+    let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+    let (iam_root, iam_alt) = (get_iam_root_client(), get_iam_alt_root_client());
+    let cfg = get_config();
+    let path = &cfg.iam_path_prefix;
+    let user_name = format!("{}MyUser", cfg.iam_name_prefix);
+    let role_name = format!("{}MyRole", cfg.iam_name_prefix);
+
+    /* create user with alt account */
+    let user = iam_alt.create_user().user_name(&user_name).path(path).send().await.unwrap();
+    let user_arn = user.user().unwrap().arn().to_string();
+    let key = iam_alt.create_access_key().user_name(&user_name).send().await.unwrap()
+        .access_key().unwrap().clone();
+    let sts = build_sts_client(key.access_key_id(), key.secret_access_key());
+
+    let trust_policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Action": "sts:AssumeRole",
+                       "Principal": {"AWS": &user_arn}}]
+    }).to_string();
+    /* create role with main account */
+    let role = iam_root.create_role().role_name(&role_name).path(path)
+        .assume_role_policy_document(&trust_policy).send().await.unwrap();
+    let role_arn = role.role().unwrap().arn().to_string();
+
+    /* reject AssumeRole due to lack of identity policy */
+    let refused = sts.assume_role().role_arn(&role_arn).role_session_name("MySession")
+        .send().await;
+
+    allow_assume_role(&iam_alt, &user_name, &role_arn).await;
+    let allowed = sts.assume_role().role_arn(&role_arn).role_session_name("MySession")
+        .send().await;
+
+    let _ = iam_root.delete_role().role_name(&role_name).send().await;
+    let _ = iam_alt.delete_user_policy().user_name(&user_name).policy_name("AllowAssumeRole")
+        .send().await;
+    let _ = iam_alt.delete_access_key().user_name(&user_name)
+        .access_key_id(key.access_key_id()).send().await;
+    let _ = iam_alt.delete_user().user_name(&user_name).send().await;
+    s3_tests_rs::assert_s3_err!(refused, 403, "AccessDenied");
+    allowed.unwrap();
+}
+
+/* test_sts.py's test_same_account_trust_policy_assume_role:  in the role's
+ * own account, a trust policy naming the user grants AssumeRole alone */
+#[tokio::test]
+async fn test_same_account_trust_policy_assume_role() {
+    let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+    let iam_root = get_iam_root_client();
+    let cfg = get_config();
+    let path = &cfg.iam_path_prefix;
+    let user_name = format!("{}MyUser", cfg.iam_name_prefix);
+    let role_name = format!("{}MyRole", cfg.iam_name_prefix);
+
+    let user = iam_root.create_user().user_name(&user_name).path(path).send().await.unwrap();
+    let user_arn = user.user().unwrap().arn().to_string();
+    let trust_policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Action": "sts:AssumeRole",
+                       "Principal": {"AWS": &user_arn}}]
+    }).to_string();
+    let role = iam_root.create_role().role_name(&role_name).path(path)
+        .assume_role_policy_document(&trust_policy).send().await.unwrap();
+    let role_arn = role.role().unwrap().arn().to_string();
+    let key = iam_root.create_access_key().user_name(&user_name).send().await.unwrap()
+        .access_key().unwrap().clone();
+    let sts = build_sts_client(key.access_key_id(), key.secret_access_key());
+
+    /* AssumeRole is granted by role trust policy alone */
+    let allowed = sts.assume_role().role_arn(&role_arn).role_session_name("MySession")
+        .send().await;
+
+    let _ = iam_root.delete_role().role_name(&role_name).send().await;
+    let _ = iam_root.delete_access_key().user_name(&user_name)
+        .access_key_id(key.access_key_id()).send().await;
+    let _ = iam_root.delete_user().user_name(&user_name).send().await;
+    allowed.unwrap();
+}
+
+/* test_sts.py's test_same_account_user_policy_assume_role:  in the role's
+ * own account, a trust policy that does not name the user leaves AssumeRole
+ * to the user's identity policy */
+#[tokio::test]
+async fn test_same_account_user_policy_assume_role() {
+    let _guard = s3_tests_rs::fixtures::TestGuard::setup();
+    let iam_root = get_iam_root_client();
+    let cfg = get_config();
+    let path = &cfg.iam_path_prefix;
+    let user_name = format!("{}MyUser", cfg.iam_name_prefix);
+    let role_name = format!("{}MyRole", cfg.iam_name_prefix);
+
+    /* role trust policy does not allow owning account principal */
+    let trust_policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Action": "sts:AssumeRole",
+                       "Principal": {"AWS": "OTHERACCOUNT"}}]
+    }).to_string();
+    let role = iam_root.create_role().role_name(&role_name).path(path)
+        .assume_role_policy_document(&trust_policy).send().await.unwrap();
+    let role_arn = role.role().unwrap().arn().to_string();
+    iam_root.create_user().user_name(&user_name).path(path).send().await.unwrap();
+    let key = iam_root.create_access_key().user_name(&user_name).send().await.unwrap()
+        .access_key().unwrap().clone();
+    let sts = build_sts_client(key.access_key_id(), key.secret_access_key());
+
+    /* reject AssumeRole due to lack of identity policy */
+    let refused = sts.assume_role().role_arn(&role_arn).role_session_name("MySession")
+        .send().await;
+
+    allow_assume_role(&iam_root, &user_name, &role_arn).await;
+    let allowed = sts.assume_role().role_arn(&role_arn).role_session_name("MySession")
+        .send().await;
+
+    let _ = iam_root.delete_role().role_name(&role_name).send().await;
+    let _ = iam_root.delete_user_policy().user_name(&user_name).policy_name("AllowAssumeRole")
+        .send().await;
+    let _ = iam_root.delete_access_key().user_name(&user_name)
+        .access_key_id(key.access_key_id()).send().await;
+    let _ = iam_root.delete_user().user_name(&user_name).send().await;
+    s3_tests_rs::assert_s3_err!(refused, 403, "AccessDenied");
+    allowed.unwrap();
 }

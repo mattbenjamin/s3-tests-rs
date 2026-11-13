@@ -236,6 +236,14 @@ async fn test_cross_account_role_policy_allow() {
         .assume_role_policy_document(&trust_policy).send().await.unwrap();
     let role_arn = role.role().unwrap().arn().to_string();
 
+    /* add user policy to assume the role arn */
+    let assume_policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Action": "sts:AssumeRole", "Resource": &role_arn}]
+    }).to_string();
+    get_iam_alt_root_client().put_user_policy().user_name(&user.name)
+        .policy_name("AllowAssumeRole").policy_document(assume_policy).send().await.unwrap();
+
     let sts = build_sts_client(&user.access_key, &user.secret_key);
     let resp = sts.assume_role().role_arn(&role_arn).role_session_name("MySession")
         .send().await.unwrap();
@@ -265,6 +273,8 @@ async fn test_cross_account_role_policy_allow() {
     let _ = iam_root.delete_role_policy().role_name(&role_name)
         .policy_name("AllowListBucket").send().await;
     let _ = iam_root.delete_role().role_name(&role_name).send().await;
+    let _ = get_iam_alt_root_client().delete_user_policy().user_name(&user.name)
+        .policy_name("AllowAssumeRole").send().await;
     user.delete().await;
     assert!(!no_policy, "the session listed the bucket with no identity policy");
     assert!(!role_policy_only, "the session listed the other account's bucket on its role \
