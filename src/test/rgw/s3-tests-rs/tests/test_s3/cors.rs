@@ -209,8 +209,9 @@ async fn test_cors_origin_response() {
         .await
         .unwrap();
 
-    let cors_err = client.get_bucket_cors().bucket(&bucket).send().await;
-    assert!(cors_err.is_err());
+    let result = client.get_bucket_cors().bucket(&bucket).send().await;
+    let err = expect_s3_err!(result);
+    assert_eq!(err.status, 404);
 
     let cors_config = CorsConfiguration::builder()
         .cors_rules(CorsRule::builder().allowed_methods("GET").allowed_origins("*suffix").build().unwrap())
@@ -232,82 +233,77 @@ async fn test_cors_origin_response() {
     let url = get_endpoint_url(&bucket);
     let obj_url = get_object_url(&bucket, "bar");
 
-    // GET without Origin
-    let r = raw_request(reqwest::Method::GET, &url, None).await;
-    cors_request_and_check(&r, 200, None, None);
+    /* One request:  method, URL, headers (a PUT carries content-length: 0,
+     * as the Python's does), and what it must return. */
+    async fn check(
+        method: reqwest::Method,
+        url: &str,
+        headers: &[(&str, &str)],
+        status: u16,
+        origin: Option<&str>,
+        methods: Option<&str>,
+    ) {
+        let mut h: HashMap<String, String> =
+            headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        if method == reqwest::Method::PUT {
+            h.insert("content-length".into(), "0".into());
+        }
+        let hdrs = if h.is_empty() { None } else { Some(&h) };
+        let r = raw_request(method, url, hdrs).await;
+        cors_request_and_check(&r, status, origin, methods);
+    }
+    use reqwest::Method as M;
 
-    // GET with matching suffix origin
-    let mut h = HashMap::new();
-    h.insert("Origin".into(), "foo.suffix".into());
-    let r = raw_request(reqwest::Method::GET, &url, Some(&h)).await;
-    cors_request_and_check(&r, 200, Some("foo.suffix"), Some("GET"));
+    /* A simple request whose Origin matches no rule is 403, as AWS
+     * documents ("For each request that Amazon S3 receives, you must have
+     * a CORS rule in your CORS configuration that matches the data in
+     * your request") and as RGW does since ceph #70697.  NooBaa serves it
+     * 200 without CORS headers. */
+    check(M::GET, &url, &[], 200, None, None).await;
+    check(M::GET, &url, &[("Origin", "foo.suffix")], 200, Some("foo.suffix"), Some("GET")).await;
+    check(M::GET, &url, &[("Origin", "foo.bar")], 403, None, None).await;
+    check(M::GET, &url, &[("Origin", "foo.get.suffix")], 200, Some("foo.get.suffix"), Some("GET")).await;
+    check(M::GET, &url, &[("Origin", "startend")], 200, Some("startend"), Some("GET")).await;
+    check(M::GET, &url, &[("Origin", "start1end")], 200, Some("start1end"), Some("GET")).await;
+    check(M::GET, &url, &[("Origin", "start12end")], 200, Some("start12end"), Some("GET")).await;
+    check(M::GET, &url, &[("Origin", "0start12end")], 403, None, None).await;
+    check(M::GET, &url, &[("Origin", "prefix")], 200, Some("prefix"), Some("GET")).await;
+    check(M::GET, &url, &[("Origin", "prefix.suffix")], 200, Some("prefix.suffix"), Some("GET")).await;
+    check(M::GET, &url, &[("Origin", "bla.prefix")], 403, None, None).await;
 
-    // GET with non-matching origin
-    h.insert("Origin".into(), "foo.bar".into());
-    let r = raw_request(reqwest::Method::GET, &url, Some(&h)).await;
-    cors_request_and_check(&r, 200, None, None);
+    check(M::GET, &obj_url, &[("Origin", "foo.suffix")], 404, Some("foo.suffix"), Some("GET")).await;
+    check(M::PUT, &obj_url, &[("Origin", "foo.suffix"), ("Access-Control-Request-Method", "GET")],
+          403, Some("foo.suffix"), Some("GET")).await;
+    check(M::PUT, &obj_url, &[("Origin", "foo.suffix"), ("Access-Control-Request-Method", "PUT")],
+          403, None, None).await;
+    check(M::PUT, &obj_url, &[("Origin", "foo.suffix"), ("Access-Control-Request-Method", "DELETE")],
+          403, None, None).await;
+    check(M::PUT, &obj_url, &[("Origin", "foo.suffix")], 403, None, None).await;
+    check(M::PUT, &obj_url, &[("Origin", "foo.put")], 403, Some("foo.put"), Some("PUT")).await;
+    check(M::GET, &obj_url, &[("Origin", "foo.suffix")], 404, Some("foo.suffix"), Some("GET")).await;
 
-    // GET with matching start*end
-    h.insert("Origin".into(), "startend".into());
-    let r = raw_request(reqwest::Method::GET, &url, Some(&h)).await;
-    cors_request_and_check(&r, 200, Some("startend"), Some("GET"));
-
-    h.insert("Origin".into(), "start1end".into());
-    let r = raw_request(reqwest::Method::GET, &url, Some(&h)).await;
-    cors_request_and_check(&r, 200, Some("start1end"), Some("GET"));
-
-    h.insert("Origin".into(), "start12end".into());
-    let r = raw_request(reqwest::Method::GET, &url, Some(&h)).await;
-    cors_request_and_check(&r, 200, Some("start12end"), Some("GET"));
-
-    h.insert("Origin".into(), "0start12end".into());
-    let r = raw_request(reqwest::Method::GET, &url, Some(&h)).await;
-    cors_request_and_check(&r, 200, None, None);
-
-    // GET with matching prefix*
-    h.insert("Origin".into(), "prefix".into());
-    let r = raw_request(reqwest::Method::GET, &url, Some(&h)).await;
-    cors_request_and_check(&r, 200, Some("prefix"), Some("GET"));
-
-    h.insert("Origin".into(), "prefix.suffix".into());
-    let r = raw_request(reqwest::Method::GET, &url, Some(&h)).await;
-    cors_request_and_check(&r, 200, Some("prefix.suffix"), Some("GET"));
-
-    h.insert("Origin".into(), "bla.prefix".into());
-    let r = raw_request(reqwest::Method::GET, &url, Some(&h)).await;
-    cors_request_and_check(&r, 200, None, None);
-
-    // GET on non-existent object with matching origin
-    h.insert("Origin".into(), "foo.suffix".into());
-    let r = raw_request(reqwest::Method::GET, &obj_url, Some(&h)).await;
-    cors_request_and_check(&r, 404, Some("foo.suffix"), Some("GET"));
-
-    // OPTIONS without required headers
-    let r = raw_request(reqwest::Method::OPTIONS, &url, None).await;
-    cors_request_and_check(&r, 400, None, None);
-
-    // OPTIONS with matching origin + method
-    h.clear();
-    h.insert("Origin".into(), "foo.suffix".into());
-    h.insert("Access-Control-Request-Method".into(), "GET".into());
-    let r = raw_request(reqwest::Method::OPTIONS, &obj_url, Some(&h)).await;
-    cors_request_and_check(&r, 200, Some("foo.suffix"), Some("GET"));
-
-    // OPTIONS with non-matching origin
-    h.insert("Origin".into(), "foo.bar".into());
-    let r = raw_request(reqwest::Method::OPTIONS, &url, Some(&h)).await;
-    cors_request_and_check(&r, 403, None, None);
-
-    // OPTIONS with PUT origin
-    h.insert("Origin".into(), "foo.put".into());
-    h.insert("Access-Control-Request-Method".into(), "GET".into());
-    let r = raw_request(reqwest::Method::OPTIONS, &url, Some(&h)).await;
-    cors_request_and_check(&r, 403, None, None);
-
-    h.insert("Origin".into(), "foo.put".into());
-    h.insert("Access-Control-Request-Method".into(), "PUT".into());
-    let r = raw_request(reqwest::Method::OPTIONS, &url, Some(&h)).await;
-    cors_request_and_check(&r, 200, Some("foo.put"), Some("PUT"));
+    check(M::OPTIONS, &url, &[], 400, None, None).await;
+    check(M::OPTIONS, &url, &[("Origin", "foo.suffix")], 400, None, None).await;
+    check(M::OPTIONS, &url, &[("Origin", "bla")], 400, None, None).await;
+    check(M::OPTIONS, &obj_url, &[("Origin", "foo.suffix"), ("Access-Control-Request-Method", "GET")],
+          200, Some("foo.suffix"), Some("GET")).await;
+    for (origin, status, ok) in [
+        ("foo.bar", 403, false),
+        ("foo.suffix.get", 403, false),
+        ("startend", 200, true),
+        ("start1end", 200, true),
+        ("start12end", 200, true),
+        ("0start12end", 403, false),
+        ("prefix", 200, true),
+        ("prefix.suffix", 200, true),
+        ("bla.prefix", 403, false),
+        ("foo.put", 403, false),
+    ] {
+        check(M::OPTIONS, &url, &[("Origin", origin), ("Access-Control-Request-Method", "GET")],
+              status, ok.then_some(origin), ok.then_some("GET")).await;
+    }
+    check(M::OPTIONS, &url, &[("Origin", "foo.put"), ("Access-Control-Request-Method", "PUT")],
+          200, Some("foo.put"), Some("PUT")).await;
 }
 
 async fn test_cors_presigned_method(
